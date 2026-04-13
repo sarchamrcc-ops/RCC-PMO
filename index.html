@@ -2579,8 +2579,18 @@ const STORAGE_KEYS = { users:'pmo_users_v5', tasks:'pmo_tasks_v6', session:'pmo_
 const SYNC_KEYS = ['pmo_users_v5','pmo_tasks_v6','pmo_projects_v6'];
 let _fbApp = null, _fbDb = null, _syncEnabled = false, _isSyncing = false;
 
+// ── HARDCODED CONFIG: every user auto-connects on any browser ─────
+const _FIREBASE_CONFIG_HARDCODED = {
+  apiKey:      "AIzaSyCQ8sUj5c7WP5okQpdiYpgrbw1W7fwaIy0",
+  authDomain:  "rcc-pmo.firebaseapp.com",
+  databaseURL: "https://rcc-pmo-default-rtdb.europe-west1.firebasedatabase.app",
+  projectId:   "rcc-pmo"
+};
+
 function getFirebaseConfig() {
-  try { return JSON.parse(localStorage.getItem('pmo_firebase_config')||'{}'); } catch(e){ return {}; }
+  // Always return the hardcoded config — localStorage override kept for admin use only
+  const stored = (() => { try { return JSON.parse(localStorage.getItem('pmo_firebase_config')||'{}'); } catch(e){ return {}; } })();
+  return (stored.apiKey && stored.databaseURL) ? stored : _FIREBASE_CONFIG_HARDCODED;
 }
 function saveFirebaseConfig(cfg) {
   localStorage.setItem('pmo_firebase_config', JSON.stringify(cfg));
