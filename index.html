@@ -6308,9 +6308,11 @@ async function addShortcut() {
     try {
       const fileHandle = await window.showSaveFilePicker({
         suggestedName : 'RCC-PMO.url',
-        startIn       : 'desktop'           // opens dialog on the Desktop
-        // NOTE: no 'types' constraint — declaring .url in types triggers
-        // Chrome's dangerous-extension guard which renames it to .urldownload
+        startIn       : 'desktop',
+        types         : [{
+          description : 'Internet Shortcut',
+          accept      : { 'text/plain': ['.url'] }
+        }]
       });
       const writable = await fileHandle.createWritable();
       await writable.write(urlText);
