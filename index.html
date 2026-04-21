@@ -14,8 +14,9 @@
 <title>RCC-PMO · Task Management</title>
   <meta name="application-name" content="RCC-PMO">
   <script src="https://cdn.jsdelivr.net/npm/@emailjs/browser@4/dist/email.min.js" crossorigin="anonymous"></script>
-  <!-- Gun.js — zero-config P2P real-time sync -->
-  <script src="https://cdn.jsdelivr.net/npm/gun/gun.js"></script>
+  <!-- Firebase Realtime Database — hardcoded, zero-config for all users -->
+  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
   <meta name="description" content="Al Rugaib Construction Co. — PMO Task Management">
   <meta name="theme-color" content="#C0392B">
   <meta name="mobile-web-app-capable" content="yes">
@@ -2550,7 +2551,7 @@ const STORAGE_KEYS = { users:'pmo_users_v5', tasks:'pmo_tasks_v6', session:'pmo_
     // Clear all old version keys
     // Clear only truly old/stale keys.
     // Current SYNC_KEYS (pmo_tasks_v6, pmo_projects_v6, pmo_users_v5) are
-    // intentionally excluded — Gun.js will restore them as source of truth.
+    // intentionally excluded — Firebase will restore them as source of truth.
     ['pmo_users','pmo_users_v2','pmo_users_v3','pmo_users_v4',
      'pmo_session','pmo_session_v2','pmo_session_v3','pmo_session_v4',
      'pmo_projects','pmo_projects_v3',
@@ -2575,67 +2576,71 @@ const STORAGE_KEYS = { users:'pmo_users_v5', tasks:'pmo_tasks_v6', session:'pmo_
   }
 })();
 
-// ── Gun.js Sync Layer — zero-config P2P real-time sync ────────────
-// No API keys. No accounts. Works automatically for every user.
+// ── Firebase Sync Layer — hardcoded config, auto-connects for every user ──
 const SYNC_KEYS = ['pmo_users_v5','pmo_tasks_v6','pmo_projects_v6'];
-const GUN_NAMESPACE = 'rcc-pmo-v1';
-// Public relay peers — Gun falls back to localStorage-only if all are unreachable
-const GUN_PEERS = [
-  'https://gun-manhattan.herokuapp.com/gun',
-  'https://peer.wallie.io/gun',
-  'https://relay.peer.ooo/gun'
-];
 
-let _gun = null, _syncEnabled = false, _putPending = {};
+// Config is hardcoded — no manual setup required for any user.
+const _FB_CONFIG = {
+  apiKey:            "AIzaSyCQ8sUj5c7WP5okQpdiYpgrbw1W7fwaIy0",
+  authDomain:        "rcc-pmo.firebaseapp.com",
+  databaseURL:       "https://rcc-pmo-default-rtdb.europe-west1.firebasedatabase.app",
+  projectId:         "rcc-pmo",
+  storageBucket:     "rcc-pmo.firebasestorage.app",
+  messagingSenderId: "414571833584",
+  appId:             "1:414571833584:web:fe8b1f3fb68e451f943a35"
+};
 
-function initGunSync() {
+let _fbApp = null, _fbDb = null, _syncEnabled = false, _isSyncing = false;
+
+function initFirebaseSync() {
   try {
-    _gun = Gun({ peers: GUN_PEERS, localStorage: false });
+    if (!_fbApp) {
+      _fbApp = firebase.initializeApp(_FB_CONFIG, 'rcc-pmo-sync');
+    }
+    _fbDb = firebase.database(_fbApp);
     _syncEnabled = true;
 
-    // ── REMOTE → LOCAL listener ────────────────────────────────────
-    // Fires on first connect (initial data pull) and on every
-    // subsequent remote change. We skip writes we ourselves just made
-    // by comparing to what's already in localStorage.
+    // ── REMOTE → LOCAL: live listener, fires on connect + every remote change ──
     SYNC_KEYS.forEach(key => {
-      _gun.get(GUN_NAMESPACE).get(key).on(raw => {
-        if (!raw || typeof raw !== 'string') return;
-        // Ignore echo of our own recent put
-        if (_putPending[key] && _putPending[key] === raw) return;
-        const local = localStorage.getItem(key);
-        if (local === raw) return; // no change
-        // Validate it's real JSON before accepting
-        try { JSON.parse(raw); } catch(e) { return; }
-        localStorage.setItem(key, raw);
-        try { if (typeof renderCurrentView === 'function') renderCurrentView(); } catch(e){}
+      _fbDb.ref('pmo/' + key).on('value', snap => {
+        if (_isSyncing) return;
+        const val = snap.val();
+        if (val !== null && val !== undefined) {
+          const remote = JSON.stringify(val);
+          if (localStorage.getItem(key) !== remote) {
+            localStorage.setItem(key, remote);
+            try { if (typeof renderCurrentView === 'function') renderCurrentView(); } catch(e){}
+          }
+        }
       });
     });
 
-    // ── BOOTSTRAP: Gun is source of truth ─────────────────────────
-    // On first load, read Gun once:
-    //   • If Gun has data  → overwrite local (remote wins)
-    //   • If Gun is empty  → push local to Gun (first-time seeding)
+    // ── BOOTSTRAP: Firebase is source of truth ────────────────────────────────
+    // Remote data wins on every load. If Firebase is empty, seed from local
+    // (first-time admin setup only). This means app updates never overwrite
+    // team data already in Firebase.
     SYNC_KEYS.forEach(key => {
-      _gun.get(GUN_NAMESPACE).get(key).once(raw => {
-        if (raw && typeof raw === 'string' && raw.length > 4) {
-          try { JSON.parse(raw); } catch(e) { return; }
-          if (localStorage.getItem(key) !== raw) {
-            localStorage.setItem(key, raw);
+      _fbDb.ref('pmo/' + key).once('value', snap => {
+        const val = snap.val();
+        if (val !== null && val !== undefined) {
+          const remote = JSON.stringify(val);
+          if (localStorage.getItem(key) !== remote) {
+            localStorage.setItem(key, remote);
             try { if (typeof renderCurrentView === 'function') renderCurrentView(); } catch(e){}
           }
         } else {
-          // Gun is empty — seed from local storage (admin's first run)
+          // Firebase empty → seed from local (first admin run only)
           const local = localStorage.getItem(key);
-          if (local) pushToGun(key, JSON.parse(local));
+          if (local) {
+            try { _fbDb.ref('pmo/' + key).set(JSON.parse(local)); } catch(e){}
+          }
         }
       });
     });
 
     updateSyncStatus('🟢 Synced');
-    // Heartbeat: re-confirm connected state every 30 s
-    setInterval(() => { if (_syncEnabled) updateSyncStatus('🟢 Synced'); }, 30000);
   } catch(e) {
-    console.warn('Gun.js init error:', e);
+    console.warn('Firebase sync error:', e);
     _syncEnabled = false;
     updateSyncStatus('🔴 Local Only');
   }
@@ -2644,30 +2649,23 @@ function initGunSync() {
 function updateSyncStatus(msg) {
   const el = document.getElementById('syncStatusBadge');
   if (!el) return;
-  const connected = msg && msg.includes('🟢');
+  const ok = msg && msg.includes('🟢');
   el.textContent = msg || (_syncEnabled ? '🟢 Synced' : '🔴 Local Only');
-  el.style.color = connected ? '#27ae60' : '#e74c3c';
+  el.style.color  = ok ? '#27ae60' : '#e74c3c';
 }
 
-function pushToGun(key, data) {
-  if (!_gun) return;
+function pushToFirebase(key, data) {
+  if (!_syncEnabled || !_fbDb) return;
+  _isSyncing = true;
   try {
-    const serialized = JSON.stringify(data);
-    _putPending[key] = serialized; // mark to suppress echo
-    _gun.get(GUN_NAMESPACE).get(key).put(serialized, ack => {
-      if (ack && !ack.err) {
-        updateSyncStatus('🟢 Synced');
-      }
-      // Clear echo-suppression after a short window
-      setTimeout(() => { delete _putPending[key]; }, 3000);
-    });
-  } catch(e) { console.warn('Gun push error:', e); }
+    _fbDb.ref('pmo/' + key).set(data, () => { _isSyncing = false; });
+  } catch(e) { _isSyncing = false; }
 }
 
 function save(key, data) {
   try {
     localStorage.setItem(key, JSON.stringify(data));
-    if (SYNC_KEYS.includes(key)) pushToGun(key, data);
+    if (SYNC_KEYS.includes(key)) pushToFirebase(key, data);
   } catch(e){}
 }
 function load(key, def) {
@@ -2859,7 +2857,7 @@ function doLogin() {
   document.getElementById('app').classList.add('visible');
   if (user.forceChange) { showForceChangeModal(); }
   else { initApp(); }
-  setTimeout(initGunSync, 500);
+  setTimeout(initFirebaseSync, 500);
 }
 
 function doLogout() {
@@ -4340,13 +4338,13 @@ function renderAdmin() {
           </div>
           <!-- Email Notifications -->
           <div class="form-group" style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border);">
-            <label style="font-weight:600;">🔄 Real-Time Sync (Gun.js)</label>
+            <label style="font-weight:600;">🔄 Real-Time Sync (Firebase)</label>
             <div class="text-xs" style="color:var(--text3);margin-bottom:10px;line-height:1.6;">
-              Sync is <strong>automatic</strong> — no accounts or API keys required. All users connect the moment they load the page via the Gun.js peer-to-peer network.
+              Sync is <strong>automatic</strong> — Firebase is hardcoded and connects instantly for every user. No setup required.
             </div>
             <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;">
               <span style="font-size:12px;color:var(--text3);">Connection status is shown in the top-right corner of the app.</span>
-              <button class="btn btn-ghost btn-sm" onclick="SYNC_KEYS.forEach(k=>pushToGun(k,JSON.parse(localStorage.getItem(k)||'[]')));toast('All data pushed to network.','success')">↑ Force Push</button>
+              <button class="btn btn-ghost btn-sm" onclick="SYNC_KEYS.forEach(k=>{const d=localStorage.getItem(k);if(d)pushToFirebase(k,JSON.parse(d));});toast('All data pushed to Firebase.','success')">↑ Force Push</button>
             </div>
             <hr style="border-color:var(--border);margin-bottom:16px;">
             <label style="font-weight:600;">📧 Email Notifications (EmailJS)</label>
