@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>Villa 2 — Project Status Tracker</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@300;400;600&family=Jost:wght@300;400;500;600&display=swap" rel="stylesheet"/>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:'Jost',system-ui,sans-serif;background:#f5f2ec;color:#1c1712;min-height:100vh}
+  ::-webkit-scrollbar{width:5px;height:5px}
+  ::-webkit-scrollbar-track{background:#ede8df}
+  ::-webkit-scrollbar-thumb{background:#b8953a66;border-radius:3px}
+  .tr:hover{background:rgba(184,149,58,0.05)!important}
+  .stab{cursor:pointer;transition:all 0.18s;font-family:'Jost',sans-serif}
+  .stab:hover{opacity:0.75}
+  .tooltip{display:none;position:absolute;right:8px;top:50%;transform:translateY(-50%);display:flex;gap:5px;align-items:center;z-index:10}
+  .tr:hover .tooltip{display:flex}
+</style>
+</head>
+<body><div id="root"></div>
+<script>
+// ─── TIMELINE ────────────────────────────────────────────────────────────────
+const START     = new Date("2026-04-01");
+const DAYS      = 76;
+const TODAY_OFF = 21;
+
+function toOff(raw) {
+  if (!raw) return null;
+  const s = String(raw).trim();
+  const m = s.match(/^(\d{1,2})-(\d{1,2})-(\d{2,4})$/);
+  if (!m) return null;
+  let [, d, mo, yr] = m;
+  if (yr.length === 2) yr = "20" + yr;
+  const dt = new Date(`${yr}-${mo.padStart(2,"0")}-${d.padStart(2,"0")}`);
+  return isNaN(dt) ? null : Math.round((dt - START) / 86400000);
+}
+
+const MONTHS = [
+  { label:"APRIL 2026",  start:0,  days:30 },
+  { label:"MAY 2026",    start:30, days:31 },
+  { label:"JUNE 2026",   start:61, days:15 },
+];
+const WEEKS = [0,7,14,21,28,35,42,49,56,63,70];
+
+// ─── STATUS CONFIG ────────────────────────────────────────────────────────────
+const SCFG = {
+  "Completed":                 { color:"#16a34a", label:"Completed",             group:"done"    },
+  "Delivered":                 { color:"#16a34a", label:"Delivered",             group:"done"    },
+  "Completed/Pending Payment": { color:"#15803d", label:"Completed / Pend. Pay.",group:"done"    },
+  "ready":                     { color:"#0891b2", label:"Ready",                 group:"done"    },
+  "ready to ship":             { color:"#0284c7", label:"Ready to Ship",         group:"active"  },
+  "in shipping":               { color:"#2563eb", label:"In Shipping",           group:"active"  },
+  "Scheduled":                 { color:"#7c3aed", label:"Scheduled",             group:"active"  },
+  "order sent":                { color:"#c2610a", label:"Order Sent",            group:"active"  },
+  "In Progress":               { color:"#b45309", label:"In Progress",           group:"active"  },
+  "Pending":                   { color:"#c0392b", label:"Pending",               group:"pending" },
+  "KNX":                       { color:"#64748b", label:"KNX / On Hold",         group:"pending" },
+};
+function getCfg(raw) {
+  const k = String(raw||"").trim();
+  return SCFG[k] || { color:"#64748b", label:k, group:"active" };
+}
+
+const SC = {
+  "Main Entrance":  "#b8953a",
+  "Washbasin Area": "#2563eb",
+  "Main majles":    "#7c3aed",
+  "Dining Room":    "#c0392b",
+};
+
+const RAW = [
+  { id:1,  area:"Main Entrance",  task:"Palm & shell works + add shells around fireplace", status:"In Progress",               date:"30-04-2026", notes:"With Darwin working on sample" },
+  { id:2,  area:"Main Entrance",  task:"Entrance chandelier (painting stage)",             status:"In Progress",               date:"30-05-2026", notes:"" },
+  { id:3,  area:"Main Entrance",  task:"Abaya room completed",                             status:"KNX",                       date:null,         notes:"Lighting – awaiting KNX" },
+  { id:4,  area:"Main Entrance",  task:"L-shape sofa upholstery",                          status:"In Progress",               date:"20-5-2026",  notes:"After finalizing fabric with owner – needs 5 days" },
+  { id:5,  area:"Main Entrance",  task:"Floor box cancellation",                           status:"In Progress",               date:null,         notes:"Waiting for owner decision" },
+  { id:6,  area:"Main Entrance",  task:"Bench fabric decision",                            status:"Pending",                   date:null,         notes:"Waiting for owner decision" },
+  { id:7,  area:"Washbasin Area", task:"Last internal sink delivery",                      status:"in shipping",               date:"20-05-2026", notes:"Paulo" },
+  { id:8,  area:"Washbasin Area", task:"Mirror (no lighting) by contractor",               status:"ready",                     date:"20-05-2026", notes:"After sink installation" },
+  { id:9,  area:"Washbasin Area", task:"Lower washbasin curtains",                         status:"In Progress",               date:"30-4-2026",  notes:"Sample not approved" },
+  { id:10, area:"Washbasin Area", task:"Small black tiles frame",                          status:"In Progress",               date:"26-4-2026",  notes:"" },
+  { id:11, area:"Washbasin Area", task:"Toilet window curtains",                           status:"In Progress",               date:"25-4-2026",  notes:"Needs installation" },
+  { id:12, area:"Washbasin Area", task:"Table cover frame border",                         status:"In Progress",               date:"25-05-2026", notes:"Previous order canceled – re-ordered" },
+  { id:13, area:"Main majles",    task:"Wooden works",                                     status:"Completed",                 date:null,         notes:"" },
+  { id:14, area:"Main majles",    task:"Curtain supplier meeting",                         status:"Scheduled",                 date:"22-04-2026", notes:"New fabric selection" },
+  { id:15, area:"Main majles",    task:"LULU LAROTUNE sofa",                               status:"ready to ship",             date:null,         notes:"Paulo" },
+  { id:16, area:"Main majles",    task:"DOOQ sofa",                                        status:"In Progress",               date:"30-4-26",    notes:"Extra trim ordered" },
+  { id:17, area:"Main majles",    task:"DUDGEON sofa",                                     status:"Completed/Pending Payment", date:"15-05-2026", notes:"Waiting transfer confirmation" },
+  { id:18, area:"Main majles",    task:"PACIFIC sofa",                                     status:"Delivered",                 date:null,         notes:"Owner to approve fabric" },
+  { id:19, area:"Main majles",    task:"SCOUT benches",                                    status:"order sent",                date:null,         notes:"Waiting for quotation" },
+  { id:20, area:"Main majles",    task:"SCOUT benches – fabric",                           status:"order sent",                date:null,         notes:"Waiting for quotation" },
+  { id:21, area:"Main majles",    task:"L.Z wall light",                                   status:"in shipping",               date:"15-5-2026",  notes:"Paulo" },
+  { id:22, area:"Main majles",    task:"Old convertible sofa",                             status:"In Progress",               date:"15-5-2026",  notes:"" },
+  { id:23, area:"Dining Room",    task:"Dining table with brass addition",                 status:"In Progress",               date:"30-4-2026",  notes:"" },
+  { id:24, area:"Dining Room",    task:"Buffet",                                           status:"In Progress",               date:"30-5-2026",  notes:"" },
+  { id:25, area:"Dining Room",    task:"Wall artworks – dishes",                           status:"In Progress",               date:"30-5-2026",  notes:"" },
+  { id:26, area:"Dining Room",    task:"Chair upholstery – seat",                          status:"In Progress",               date:null,         notes:"Waiting fabric" },
+  { id:27, area:"Dining Room",    task:"Chair upholstery – back",                          status:"Pending",                   date:null,         notes:"Waiting for fabric selection" },
+  { id:28, area:"Dining Room",    task:"Curtains",                                         status:"In Progress",               date:"15-05-2026", notes:"Fabric arriving end of month + 15 days install" },
+  { id:29, area:"Dining Room",    task:"Partition",                                        status:"In Progress",               date:"15-5-26",    notes:"" },
+];
+
+const SECTIONS   = ["All","Main Entrance","Washbasin Area","Main majles","Dining Room"];
+const LEGEND_ALL = [
+  ["#16a34a","Completed / Delivered"],
+  ["#15803d","Completed / Pend. Pay."],
+  ["#0891b2","Ready"],
+  ["#0284c7","Ready to Ship"],
+  ["#2563eb","In Shipping"],
+  ["#7c3aed","Scheduled"],
+  ["#c2610a","Order Sent"],
+  ["#b45309","In Progress"],
+  ["#c0392b","Pending"],
+  ["#64748b","KNX / On Hold"],
+];
+
+let activeSection = "All";
+
+const total    = RAW.length;
+const doneList = RAW.filter(t => getCfg(t.status).group === "done");
+const pendList = RAW.filter(t => getCfg(t.status).group === "pending");
+const actList  = RAW.filter(t => getCfg(t.status).group === "active");
+const pct      = Math.round(doneList.length / total * 100);
+
+const areaStats = Object.keys(SC).map(a => {
+  const g = RAW.filter(t => t.area === a);
+  const d = g.filter(t => getCfg(t.status).group === "done").length;
+  return { a, total:g.length, done:d, pct:Math.round(d/g.length*100), color:SC[a] };
+});
+
+function dispDate(raw) {
+  const m = String(raw||"").match(/^(\d{1,2})-(\d{1,2})-(\d{2,4})$/);
+  if (!m) return raw||"";
+  const mos = ["","Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  return `${m[1]} ${mos[parseInt(m[2])]}`;
+}
+
+function render() {
+  const filtered = activeSection === "All" ? RAW : RAW.filter(t => t.area === activeSection);
+  const withDate = [...filtered].filter(t => t.date).sort((a,b) => toOff(a.date)-toOff(b.date));
+  const noDate   = filtered.filter(t => !t.date);
+  const LW       = 310;
+
+  // ── TABS ──────────────────────────────────────────────────────────────────
+  const tabsHTML = SECTIONS.map(s => {
+    const active = s === activeSection;
+    const color  = s === "All" ? "#b8953a" : SC[s]||"#b8953a";
+    return `<button class="stab" data-sec="${s}" style="
+      padding:5px 16px;font-size:10px;letter-spacing:0.1em;font-weight:500;
+      background:${active ? color : "#fff"};
+      color:${active ? "#fff" : "#8a7a60"};
+      border:1px solid ${active ? color : "#ddd5c8"};
+      border-radius:20px;">${s.toUpperCase()}</button>`;
+  }).join("");
+
+  // ── AREA PROGRESS ─────────────────────────────────────────────────────────
+  const spHTML = areaStats.map(({a,total:t,done:d,pct:p,color}) => `
+    <div style="flex:1 1 130px;min-width:110px">
+      <div style="display:flex;justify-content:space-between;font-size:9.5px;margin-bottom:5px">
+        <span style="color:#6b5f4a;font-weight:500">${a}</span>
+        <span style="color:${color};font-weight:600">${p}%</span>
+      </div>
+      <div style="height:4px;background:#e8e0d0;border-radius:2px">
+        <div style="width:${p}%;height:100%;background:${color};border-radius:2px"></div>
+      </div>
+      <div style="font-size:9px;color:#a09080;margin-top:3px">${d} of ${t} done</div>
+    </div>`).join("");
+
+  // ── MONTH HEADER ──────────────────────────────────────────────────────────
+  const monthH = MONTHS.map(({label,start,days}) =>
+    `<div style="position:absolute;left:${start/DAYS*100}%;width:${days/DAYS*100}%;height:100%;border-left:1px solid #ddd5c8;display:flex;align-items:center;padding-left:12px;font-size:9.5px;letter-spacing:0.14em;color:#b8953a;font-weight:600">${label}</div>`
+  ).join("");
+  const weekTicks = WEEKS.filter(w=>w<DAYS).map(w =>
+    `<div style="position:absolute;left:${w/DAYS*100}%;bottom:0;height:6px;width:1px;background:#ddd5c8"></div>`
+  ).join("");
+
+  // ── TASK ROWS ─────────────────────────────────────────────────────────────
+  const rowsHTML = withDate.map((task, i) => {
+    const off    = toOff(task.date);
+    const bEnd   = off;
+    const bStart = Math.max(0, bEnd - 5);
+    const lPct   = bStart / DAYS * 100;
+    const wPct   = Math.max((bEnd - bStart + 1) / DAYS * 100, 0.8);
+    const cfg    = getCfg(task.status);
+    const sColor = SC[task.area] || "#b8953a";
+    const isDone = cfg.group === "done";
+    const bg     = i % 2 === 0 ? "#ffffff" : "#faf7f2";
+
+    const barBg = isDone
+      ? `background:linear-gradient(90deg,${cfg.color}cc,${cfg.color});box-shadow:0 1px 6px ${cfg.color}44;`
+      : `background:linear-gradient(90deg,${cfg.color}55,${cfg.color}88);border:1px solid ${cfg.color}88;`;
+
+    const mDivs = MONTHS.map(({start}) =>
+      `<div style="position:absolute;left:${start/DAYS*100}%;top:0;bottom:0;width:1px;background:#ede8df"></div>`).join("");
+    const wDivs = WEEKS.filter(w=>w<DAYS).map(w =>
+      `<div style="position:absolute;left:${w/DAYS*100}%;top:0;bottom:0;width:1px;background:#f2ede6"></div>`).join("");
+
+    return `
+    <div class="tr" style="display:flex;height:48px;border-bottom:1px solid #ede8df;background:${bg};position:relative">
+      <div style="width:${LW}px;min-width:${LW}px;padding:4px 14px;display:flex;align-items:center;gap:8px;border-right:1px solid #ede8df;overflow:hidden">
+        <span style="width:3px;height:20px;background:${sColor};border-radius:2px;flex-shrink:0;opacity:${isDone?1:0.7}"></span>
+        <div style="flex:1;overflow:hidden">
+          <div style="font-size:11.5px;font-weight:400;color:#1c1712;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${task.task}">${task.task}</div>
+          ${task.notes
+            ? `<div style="font-size:9.5px;color:#a09080;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-style:italic" title="${task.notes}">${task.notes}</div>`
+            : `<div style="font-size:9.5px;color:#c8bfae;margin-top:2px">${task.area}</div>`}
+        </div>
+        <span style="flex-shrink:0;font-size:9px;padding:2px 8px;border-radius:10px;background:${cfg.color}15;color:${cfg.color};border:1px solid ${cfg.color}44;white-space:nowrap;letter-spacing:0.03em;font-weight:500">${cfg.label}</span>
+      </div>
+      <div style="flex:1;position:relative;background:${bg}">
+        ${mDivs}${wDivs}
+        <div style="position:absolute;left:${TODAY_OFF/DAYS*100}%;top:0;bottom:0;width:2px;background:${isDone?"rgba(192,57,43,0.2)":"rgba(192,57,43,0.5)"};z-index:3"></div>
+        <div style="position:absolute;left:${lPct}%;width:${wPct}%;top:50%;transform:translateY(-50%);height:${isDone?14:11}px;border-radius:4px;z-index:2;${barBg}"></div>
+        <div class="tooltip">
+          <span style="font-size:9.5px;color:${sColor};background:#fff;padding:2px 8px;border-radius:4px;border:1px solid ${sColor}55;white-space:nowrap;box-shadow:0 1px 4px rgba(0,0,0,0.08)">${task.area}</span>
+          <span style="font-size:9.5px;color:${cfg.color};background:#fff;padding:2px 8px;border-radius:4px;border:1px solid ${cfg.color}55;white-space:nowrap;box-shadow:0 1px 4px rgba(0,0,0,0.08)">↦ ${dispDate(task.date)}</span>
+          ${task.notes ? `<span style="font-size:9.5px;color:#6b5f4a;background:#fff;padding:2px 8px;border-radius:4px;border:1px solid #ddd5c8;box-shadow:0 1px 4px rgba(0,0,0,0.08);max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${task.notes}</span>` : ""}
+        </div>
+      </div>
+    </div>`;
+  }).join("");
+
+  // ── NO-DATE ROWS ──────────────────────────────────────────────────────────
+  const noDateHTML = noDate.length === 0 ? "" : `
+    <div style="padding:9px 16px;background:#f0ebe2;border-top:1px solid #ddd5c8;border-bottom:1px solid #ddd5c8;font-size:9px;letter-spacing:0.18em;color:#a09080">
+      PENDING DATE ASSIGNMENT — ${noDate.length} ITEMS
+    </div>
+    ${noDate.map((task, i) => {
+      const cfg    = getCfg(task.status);
+      const sColor = SC[task.area]||"#b8953a";
+      return `
+      <div class="tr" style="display:flex;height:48px;border-bottom:1px solid #ede8df;background:${i%2===0?"#faf7f2":"#f5f2ec"}">
+        <div style="width:${LW}px;min-width:${LW}px;padding:4px 14px;display:flex;align-items:center;gap:8px;border-right:1px solid #ede8df;overflow:hidden">
+          <span style="width:3px;height:20px;background:${sColor};border-radius:2px;flex-shrink:0;opacity:0.35"></span>
+          <div style="flex:1;overflow:hidden">
+            <div style="font-size:11.5px;color:#8a7a60;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${task.task}</div>
+            ${task.notes
+              ? `<div style="font-size:9.5px;color:#b8b0a0;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-style:italic">${task.notes}</div>`
+              : `<div style="font-size:9.5px;color:#c8bfae;margin-top:2px">${task.area}</div>`}
+          </div>
+          <span style="flex-shrink:0;font-size:9px;padding:2px 8px;border-radius:10px;background:${cfg.color}12;color:${cfg.color};border:1px solid ${cfg.color}44;white-space:nowrap;font-weight:500">${cfg.label}</span>
+        </div>
+        <div style="flex:1;display:flex;align-items:center;padding-left:16px;gap:10px">
+          <span style="font-size:9px;letter-spacing:0.1em;color:#a09080;border:1px solid #ddd5c8;border-radius:12px;padding:2px 10px;background:#fff">DATE TBD</span>
+          <span style="font-size:9.5px;color:${sColor}99">${task.area}</span>
+        </div>
+      </div>`;
+    }).join("")}`;
+
+  // ── LEGEND ────────────────────────────────────────────────────────────────
+  const legendHTML = LEGEND_ALL.map(([c,l]) =>
+    `<div style="display:flex;align-items:center;gap:5px;white-space:nowrap">
+      <div style="width:16px;height:7px;background:${c};border-radius:3px;opacity:0.85"></div>
+      <span style="font-size:9.5px;color:#8a7a60">${l}</span>
+    </div>`
+  ).join("");
+
+  // ── INJECT ────────────────────────────────────────────────────────────────
+  document.getElementById("root").innerHTML = `
+  <div style="font-family:'Jost',system-ui,sans-serif;background:#f5f2ec;min-height:100vh;color:#1c1712">
+
+    <!-- HEADER -->
+    <div style="background:linear-gradient(135deg,#1c1712 0%,#2a2016 100%);padding:26px 32px 20px">
+      <div style="display:flex;justify-content:space-between;align-items:flex-end">
+        <div>
+          <div style="font-family:'Cormorant Garamond',Georgia,serif;font-size:28px;font-weight:600;letter-spacing:0.08em;color:#e8c870">VILLA 2 — PROJECT STATUS TRACKER</div>
+          <div style="font-size:11px;color:#8a7a5a;letter-spacing:0.14em;margin-top:5px">UPDATED STATUS &nbsp;·&nbsp; AS OF APRIL 22, 2026 &nbsp;·&nbsp; RCC – DESIGN &amp; SUPERVISION</div>
+        </div>
+        <div style="text-align:right">
+          <div style="font-size:10px;color:#6a5a3a;letter-spacing:0.12em">PROJECT</div>
+          <div style="font-family:'Cormorant Garamond',Georgia,serif;font-size:18px;color:#b8953a;letter-spacing:0.08em">VILLA 2</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- KPI CARDS -->
+    <div style="display:flex;gap:10px;padding:16px 32px;background:#fff;border-bottom:1px solid #ede8df;box-shadow:0 1px 4px rgba(0,0,0,0.04)">
+      ${[
+        { label:"TOTAL ITEMS",  val:total,           color:"#b8953a" },
+        { label:"COMPLETED",    val:doneList.length, color:"#16a34a" },
+        { label:"IN PROGRESS",  val:actList.length,  color:"#b45309" },
+        { label:"PENDING",      val:pendList.length, color:"#c0392b" },
+      ].map(c => `
+        <div style="flex:1;background:#faf7f2;border:1px solid ${c.color}28;border-radius:8px;padding:14px 18px">
+          <div style="font-size:9px;letter-spacing:0.16em;color:#a09080;margin-bottom:6px">${c.label}</div>
+          <div style="font-family:'Cormorant Garamond',Georgia,serif;font-size:26px;font-weight:600;color:${c.color}">${c.val}</div>
+        </div>`).join("")}
+      <div style="flex:1.6;background:#faf7f2;border:1px solid #b8953a28;border-radius:8px;padding:14px 18px">
+        <div style="font-size:9px;letter-spacing:0.16em;color:#a09080;margin-bottom:6px">OVERALL COMPLETION</div>
+        <div style="font-family:'Cormorant Garamond',Georgia,serif;font-size:26px;font-weight:600;color:#b8953a">${pct}%</div>
+        <div style="margin-top:8px;height:4px;background:#e8e0d0;border-radius:2px;overflow:hidden">
+          <div style="width:${pct}%;height:100%;background:linear-gradient(90deg,#b8953a,#ddb96a);border-radius:2px"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- AREA PROGRESS -->
+    <div style="padding:16px 32px;background:#fff;border-bottom:1px solid #ede8df">
+      <div style="font-size:9px;letter-spacing:0.18em;color:#b8b0a0;margin-bottom:12px">PROGRESS BY AREA</div>
+      <div style="display:flex;gap:16px;flex-wrap:wrap">${spHTML}</div>
+    </div>
+
+    <!-- TABS + LEGEND -->
+    <div style="padding:12px 32px;background:#fff;border-bottom:2px solid #ede8df">
+      <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:12px">
+        ${tabsHTML}
+      </div>
+      <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center">
+        ${legendHTML}
+        <div style="display:flex;align-items:center;gap:5px;margin-left:4px;padding-left:12px;border-left:1px solid #ede8df">
+          <div style="width:2px;height:14px;background:#c0392b;opacity:0.6"></div>
+          <span style="font-size:9.5px;color:#8a7a60">Today (Apr 22)</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- GANTT -->
+    <div style="overflow-x:auto;overflow-y:auto;max-height:calc(100vh - 330px)">
+      <div style="min-width:880px">
+
+        <!-- Month header -->
+        <div style="display:flex;position:sticky;top:0;z-index:10;background:#f0ebe2;border-bottom:2px solid #ddd5c8;height:46px;box-shadow:0 2px 6px rgba(0,0,0,0.06)">
+          <div style="width:${LW}px;min-width:${LW}px;padding:0 16px;display:flex;align-items:center;font-size:9px;letter-spacing:0.16em;color:#b8b0a0;border-right:1px solid #ddd5c8;font-weight:500">
+            TASK &nbsp;&amp;&nbsp; NOTES
+          </div>
+          <div style="flex:1;position:relative">
+            ${monthH}${weekTicks}
+            <div style="position:absolute;left:${TODAY_OFF/DAYS*100}%;top:0;bottom:0;width:2px;background:rgba(192,57,43,0.55);z-index:5">
+              <div style="position:absolute;top:5px;left:4px;font-size:8.5px;color:#c0392b;letter-spacing:0.1em;font-weight:600;white-space:nowrap">APR 22</div>
+            </div>
+          </div>
+        </div>
+
+        ${rowsHTML}
+        ${noDateHTML}
+
+      </div>
+    </div>
+
+    <!-- FOOTER -->
+    <div style="padding:12px 32px;background:#fff;border-top:1px solid #ede8df;display:flex;justify-content:space-between;align-items:center">
+      <span style="font-size:9px;color:#c8bfae;letter-spacing:0.12em">RCC — DESIGN &amp; SUPERVISION DIVISION</span>
+      <span style="font-size:9px;color:#c8bfae;letter-spacing:0.12em">VILLA 2 STATUS TRACKER &nbsp;·&nbsp; CONFIDENTIAL</span>
+    </div>
+  </div>`;
+
+  document.querySelectorAll(".stab").forEach(btn => {
+    btn.addEventListener("click", () => { activeSection = btn.dataset.sec; render(); });
+  });
+}
+
+render();
+</script>
+</body>
+</html>
