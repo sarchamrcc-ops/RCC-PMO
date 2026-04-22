@@ -2600,30 +2600,36 @@ function initFirebaseSync() {
     _fbDb = firebase.database(_fbApp);
     _syncEnabled = true;
 
-    // ── REMOTE → LOCAL: live listener, fires on connect + every remote change ──
+    // ── REMOTE → LOCAL: live listener ────────────────────────────────────────
+    // Data is stored as a JSON STRING in Firebase (under the key "d") to avoid
+    // Firebase's array→object conversion which silently corrupts arrays and
+    // drops fields like `description`. Storing as a string means Firebase
+    // never touches the structure — what goes in comes out byte-for-byte.
     SYNC_KEYS.forEach(key => {
       _fbDb.ref('pmo/' + key).on('value', snap => {
         if (_isSyncing) return;
         const val = snap.val();
-        if (val !== null && val !== undefined) {
-          const remote = JSON.stringify(val);
-          if (localStorage.getItem(key) !== remote) {
-            localStorage.setItem(key, remote);
-            try { if (typeof renderCurrentView === 'function') renderCurrentView(); } catch(e){}
-          }
+        // val is { d: "<json string>" } — extract the string
+        const remote = (val && typeof val.d === 'string') ? val.d : null;
+        if (!remote) return;
+        // Validate it's real JSON before accepting
+        try { JSON.parse(remote); } catch(e) { return; }
+        if (localStorage.getItem(key) !== remote) {
+          localStorage.setItem(key, remote);
+          try { if (typeof renderCurrentView === 'function') renderCurrentView(); } catch(e){}
         }
       });
     });
 
     // ── BOOTSTRAP: Firebase is source of truth ────────────────────────────────
-    // Remote data wins on every load. If Firebase is empty, seed from local
-    // (first-time admin setup only). This means app updates never overwrite
-    // team data already in Firebase.
+    // On load: if Firebase has data it wins (overwrites local).
+    // If Firebase is empty, seed from local (first admin run only).
     SYNC_KEYS.forEach(key => {
       _fbDb.ref('pmo/' + key).once('value', snap => {
         const val = snap.val();
-        if (val !== null && val !== undefined) {
-          const remote = JSON.stringify(val);
+        const remote = (val && typeof val.d === 'string') ? val.d : null;
+        if (remote) {
+          try { JSON.parse(remote); } catch(e) { return; }
           if (localStorage.getItem(key) !== remote) {
             localStorage.setItem(key, remote);
             try { if (typeof renderCurrentView === 'function') renderCurrentView(); } catch(e){}
@@ -2631,9 +2637,7 @@ function initFirebaseSync() {
         } else {
           // Firebase empty → seed from local (first admin run only)
           const local = localStorage.getItem(key);
-          if (local) {
-            try { _fbDb.ref('pmo/' + key).set(JSON.parse(local)); } catch(e){}
-          }
+          if (local) pushToFirebase(key, JSON.parse(local));
         }
       });
     });
@@ -2655,10 +2659,14 @@ function updateSyncStatus(msg) {
 }
 
 function pushToFirebase(key, data) {
+  // Store as { d: "<json string>" } — wrapping in an object with a string field
+  // prevents Firebase from ever touching the internal structure of the data.
+  // Arrays stay arrays, empty strings stay empty strings, all fields preserved.
   if (!_syncEnabled || !_fbDb) return;
   _isSyncing = true;
   try {
-    _fbDb.ref('pmo/' + key).set(data, () => { _isSyncing = false; });
+    const payload = { d: JSON.stringify(data) };
+    _fbDb.ref('pmo/' + key).set(payload, () => { _isSyncing = false; });
   } catch(e) { _isSyncing = false; }
 }
 
