@@ -854,6 +854,7 @@ function renderEmployee() {
       </div>
       <div style="margin-left:auto;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
         <button class="btn btn-ghost btn-sm" onclick="exportEmployeeExcel('${uid}')" title="Export this person's tasks as Excel daily-log file">📤 Export Excel</button>
+        <button class="btn btn-ghost btn-sm" onclick="showActivityLog('${uid}')" title="View this user's full activity log">📋 Activity Log</button>
         ${(isSuperAdmin() || isAdminUser()) ? `<button class="btn btn-ghost btn-sm" onclick="showBatchImportPanel()" title="Import log sheets for multiple employees at once" style="background:rgba(192,57,43,0.08);border:1px solid rgba(192,57,43,0.3);">📦 Batch Import</button>` : ''}
         <div style="position:relative;">
           <div style="display:flex;gap:0;border-radius:var(--radius);overflow:hidden;border:1px solid rgba(192,57,43,0.4);">
@@ -1439,7 +1440,20 @@ async function handleBatchImport(input) {
 function renderProjectList() {
   const el = document.getElementById('viewProjectList');
   const allTasks = visibleTasks();
-  const projects = getProjects();
+  const allUsers = getUsers();
+
+  // ── Capture filter state before rebuild ──
+  const divF = document.getElementById('plDivFilter')?.value || '';
+
+  // ── Division filter: which projects are visible? ──
+  const showDivFilter = !getVisibleDivisions(); // only admins/COO/CDO see the filter
+  let projects = getProjects();
+  if (divF) {
+    // keep only projects that have tasks assigned to users in that division
+    const divUserIds = new Set(allUsers.filter(u => u.division === divF).map(u => u.id));
+    const divProjIds = new Set(allTasks.filter(t => divUserIds.has(t.assignedTo)).map(t => t.project));
+    projects = projects.filter(p => divProjIds.has(p.id));
+  }
 
   // Hours per project — period-filtered
   const projStats = {};
@@ -1455,9 +1469,17 @@ function renderProjectList() {
   el.innerHTML = `
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;flex-wrap:wrap;gap:8px;">
       <div class="page-title">Projects</div>
-      <div style="display:flex;gap:8px;">
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+        ${showDivFilter ? `<select id="plDivFilter" onchange="renderProjectList()" style="padding:6px 10px;border-radius:var(--radius);border:1px solid var(--border2);background:var(--bg2);color:var(--text1);font-size:13px;">
+          <option value=""${divF===''?' selected':''}>All Divisions</option>
+          <option value="pmo"${divF==='pmo'?' selected':''}>🏗️ PMO</option>
+          <option value="compliance"${divF==='compliance'?' selected':''}>📋 Compliance</option>
+          <option value="fm"${divF==='fm'?' selected':''}>🔧 FM</option>
+          <option value="executive"${divF==='executive'?' selected':''}>👔 Executive</option>
+        </select>` : ''}
         <button class="btn btn-ghost btn-sm" onclick="importProjectList()" title="Import project list from Excel">📥 Import</button>
         <button class="btn btn-ghost btn-sm" onclick="exportProjectList()" title="Export project list to Excel">📤 Export</button>
+        ${canAddProject() ? `<button class="btn btn-primary btn-sm" onclick="openAddProjectModal()">✚ Add Project</button>` : ''}
       </div>
     </div>
     <div class="page-sub">Click a project to view its dashboard · Showing ${projsWithData.length} active projects.</div>
@@ -1499,6 +1521,56 @@ function openProjectDetail(pid) {
   window._currentProject = pid;
   window._projectView = 'list';
   showView('projectDetail');
+}
+
+function openAddProjectModal() {
+  document.getElementById('taskModalContent').innerHTML = `
+    <div class="modal-header">
+      <div class="modal-title">✚ Add New Project</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-row cols2">
+        <div class="form-group">
+          <label>Project Code *</label>
+          <input type="text" id="mpf_code" placeholder="e.g. SM-LS" style="text-transform:uppercase;" oninput="this.value=this.value.toUpperCase()">
+        </div>
+        <div class="form-group">
+          <label>Status</label>
+          <select id="mpf_active">
+            <option value="true">Active</option>
+            <option value="false">Inactive</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Project Name *</label>
+        <input type="text" id="mpf_name" placeholder="Full project name and scope description">
+      </div>
+      <div id="mpf_err" style="color:var(--red);font-size:12px;margin-bottom:8px;display:none;"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-primary" onclick="saveProjectFromModal()">Add Project</button>
+      <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+    </div>
+  `;
+  document.getElementById('taskModal').classList.add('open');
+  setTimeout(() => document.getElementById('mpf_code')?.focus(), 100);
+}
+
+function saveProjectFromModal() {
+  const code   = (document.getElementById('mpf_code')?.value||'').trim().toUpperCase();
+  const name   = (document.getElementById('mpf_name')?.value||'').trim();
+  const active = document.getElementById('mpf_active')?.value === 'true';
+  const errEl  = document.getElementById('mpf_err');
+  if (!code || !name) { errEl.textContent = 'Code and name are required.'; errEl.style.display = 'block'; return; }
+  const projects = getProjects();
+  if (projects.find(p => p.id === code)) { errEl.textContent = 'Project code already exists.'; errEl.style.display = 'block'; return; }
+  projects.push({ id: code, code, name, active });
+  saveProjects(projects);
+  if (typeof PROJECTS !== 'undefined') PROJECTS = getProjects();
+  toast(`Project ${code} added successfully.`, 'success');
+  closeModal();
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -1959,7 +2031,138 @@ function drawCalendar() {
 // ═══════════════════════════════════════════════════════════
 // EXCEL EXPORT — export one employee's tasks in daily-log format
 // ═══════════════════════════════════════════════════════════
+// ACTIVITY LOG
+// ═══════════════════════════════════════════════════════════
+function showActivityLog(uid) {
+  const user  = getUsers().find(u => u.id === uid);
+  if (!user) return;
+  const tasks = getTasks().filter(t =>
+    t.assignedTo === uid || t.currentHolder === uid || t.assignedBy === uid ||
+    (t.timeLogs||[]).some(l => l.userId === uid) ||
+    (t.updates||[]).some(u => u.userId === uid)
+  );
 
+  // Build a flat timeline of all events for this user
+  const events = [];
+
+  tasks.forEach(t => {
+    const proj = getProjects().find(p => p.id === t.project);
+    const label = `[${proj?.code || t.project || '—'}] ${t.title}`;
+
+    // Time log entries
+    (t.timeLogs||[]).filter(l => l.userId === uid).forEach(l => {
+      events.push({
+        ts:   new Date(l.date).getTime() || 0,
+        date: l.date,
+        icon: '⏱️',
+        color: '#2980b9',
+        taskId: t.id,
+        taskLabel: label,
+        text: `Logged ${l.hours}h${l.note ? ' — ' + l.note : ''}`,
+        type: 'timelog'
+      });
+    });
+
+    // Task update entries authored by this user
+    (t.updates||[]).filter(u => u.userId === uid).forEach(u => {
+      const isSystem = u.type === 'system';
+      events.push({
+        ts:   u.ts || 0,
+        date: u.ts ? new Date(u.ts).toLocaleDateString('en-GB') : '—',
+        icon: isSystem ? '🔧' : '💬',
+        color: isSystem ? '#7f8c8d' : '#8e44ad',
+        taskId: t.id,
+        taskLabel: label,
+        text: u.text || '',
+        type: isSystem ? 'system' : 'comment'
+      });
+    });
+  });
+
+  // Sort newest first
+  events.sort((a, b) => b.ts - a.ts);
+
+  const fmtDate = ts => {
+    if (!ts) return '—';
+    const d = new Date(ts);
+    return d.toLocaleDateString('en-GB', { day:'2-digit', month:'short', year:'numeric' }) +
+           ' ' + d.toLocaleTimeString('en-GB', { hour:'2-digit', minute:'2-digit' });
+  };
+
+  // Summary counts
+  const totalHours = tasks.reduce((s, t) =>
+    s + (t.timeLogs||[]).filter(l => l.userId === uid).reduce((a, l) => a + (Number(l.hours)||0), 0), 0);
+  const timelogCount  = events.filter(e => e.type === 'timelog').length;
+  const commentCount  = events.filter(e => e.type === 'comment').length;
+  const systemCount   = events.filter(e => e.type === 'system').length;
+
+  const rows = events.length === 0
+    ? `<tr><td colspan="4" style="text-align:center;padding:24px;color:var(--text3);">No activity recorded for this user.</td></tr>`
+    : events.map(e => `
+        <tr>
+          <td style="white-space:nowrap;font-size:11px;color:var(--text3);">${e.type === 'timelog' ? e.date : fmtDate(e.ts)}</td>
+          <td style="text-align:center;font-size:15px;">${e.icon}</td>
+          <td>
+            <button class="btn btn-ghost btn-xs" onclick="closeModal();openTask('${e.taskId}')" style="font-size:11px;padding:2px 6px;margin-bottom:2px;">${e.taskId}</button>
+            <div style="font-size:12px;color:var(--text2);">${escHtml(e.taskLabel)}</div>
+          </td>
+          <td style="font-size:12px;">${escHtml(e.text)}</td>
+        </tr>`).join('');
+
+  const divColor = DIVISION_COLORS[user.division] || '#7f8c8d';
+  const divLabel = DIVISION_LABELS[user.division] || user.division || '';
+  const initials = user.name.split(' ').map(w=>w[0]).join('').slice(0,2).toUpperCase();
+
+  document.getElementById('taskModalContent').innerHTML = `
+    <div class="modal-header" style="display:flex;align-items:center;gap:12px;">
+      <div class="user-avatar" style="width:38px;height:38px;font-size:14px;background:#C0392B;color:#fff;border-radius:50%;display:flex;align-items:center;justify-content:center;flex-shrink:0;">${initials}</div>
+      <div style="flex:1;min-width:0;">
+        <div class="modal-title" style="margin:0;">${escHtml(user.name)} — Activity Log</div>
+        <div style="font-size:11px;color:var(--text3);">${escHtml(user.title||'')}
+          ${divLabel ? `<span style="margin-left:6px;padding:1px 7px;border-radius:10px;font-size:10px;font-weight:600;background:${divColor}22;color:${divColor};border:1px solid ${divColor}44;">${divLabel}</span>` : ''}
+        </div>
+      </div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body" style="padding-top:12px;">
+      <div style="display:flex;gap:12px;margin-bottom:16px;flex-wrap:wrap;">
+        <div style="flex:1;min-width:100px;background:var(--bg3);border-radius:var(--radius);padding:10px 14px;text-align:center;">
+          <div style="font-size:20px;font-weight:700;color:var(--accent);">${fmtHours(totalHours)}</div>
+          <div style="font-size:11px;color:var(--text3);">Total Hours</div>
+        </div>
+        <div style="flex:1;min-width:100px;background:var(--bg3);border-radius:var(--radius);padding:10px 14px;text-align:center;">
+          <div style="font-size:20px;font-weight:700;color:#2980b9;">${timelogCount}</div>
+          <div style="font-size:11px;color:var(--text3);">Time Entries</div>
+        </div>
+        <div style="flex:1;min-width:100px;background:var(--bg3);border-radius:var(--radius);padding:10px 14px;text-align:center;">
+          <div style="font-size:20px;font-weight:700;color:#8e44ad;">${commentCount}</div>
+          <div style="font-size:11px;color:var(--text3);">Comments</div>
+        </div>
+        <div style="flex:1;min-width:100px;background:var(--bg3);border-radius:var(--radius);padding:10px 14px;text-align:center;">
+          <div style="font-size:20px;font-weight:700;color:var(--text3);">${systemCount}</div>
+          <div style="font-size:11px;color:var(--text3);">System Events</div>
+        </div>
+      </div>
+      <div style="overflow-x:auto;max-height:420px;overflow-y:auto;">
+        <table class="task-table" style="font-size:12px;">
+          <thead><tr>
+            <th style="width:110px;">Date</th>
+            <th style="width:32px;"></th>
+            <th>Task</th>
+            <th>Activity</th>
+          </tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeModal()">Close</button>
+    </div>
+  `;
+  document.getElementById('taskModal').classList.add('open');
+}
+
+// ═══════════════════════════════════════════════════════════
 async function exportEmployeeExcel(uid) {
   const user = getUsers().find(u=>u.id===uid);
   if (!user) return;
@@ -3022,6 +3225,16 @@ function isSuperAdmin() {
   return currentUser && (currentUser.userType === 'admin' || currentUser.role === 'coo');
 }
 
+// Who can add/manage projects from the Projects page
+function canAddProject() {
+  if (!currentUser) return false;
+  if (isAdminUser() || isSuperAdmin()) return true;  // admins + COO
+  if (currentUser.role === 'cdo') return true;        // CDO
+  if (currentUser.role === 'fm')  return true;        // FM Manager
+  if (currentUser.id  === 'u19') return true;         // Compliance Manager
+  return false;
+}
+
 // IDs visible to current user: admins/COO see all, others see their subtree
 function myVisibleUserIds() {
   if (isSuperAdmin()) return new Set(getUsers().map(u => u.id));
@@ -3285,6 +3498,7 @@ function renderTasks() {
       <select id="fCrit" onchange="filterTasks()"><option value="">All Criticalities</option>${CRITICALITIES.map(c=>`<option>${c}</option>`).join('')}</select>
       <select id="fProject" onchange="filterTasks()"><option value="">All Projects</option>${getProjects().map(p=>`<option value="${p.id}">[${p.code}] ${p.name}</option>`).join('')}</select>
       <select id="fType" onchange="filterTasks()"><option value="">All Types</option>${TASK_TYPES.map(t=>`<option>${t}</option>`).join('')}</select>
+      ${!getVisibleDivisions() ? `<select id="fDivision" onchange="filterTasks()"><option value="">All Divisions</option><option value="pmo">🏗️ PMO</option><option value="compliance">📋 Compliance</option><option value="fm">🔧 FM</option><option value="executive">👔 Executive</option></select>` : ''}
     </div>
     <div class="card">
       <div style="overflow-x:auto;">
@@ -3303,17 +3517,22 @@ function renderTasks() {
 }
 
 function filterTasks() {
-  const q  = (document.getElementById('searchQ')?.value||'').toLowerCase();
-  const fs = document.getElementById('fStatus')?.value||'';
-  const fc = document.getElementById('fCrit')?.value||'';
-  const fp = document.getElementById('fProject')?.value||'';
-  const ft = document.getElementById('fType')?.value||'';
+  const q   = (document.getElementById('searchQ')?.value||'').toLowerCase();
+  const fs  = document.getElementById('fStatus')?.value||'';
+  const fc  = document.getElementById('fCrit')?.value||'';
+  const fp  = document.getElementById('fProject')?.value||'';
+  const ft  = document.getElementById('fType')?.value||'';
+  const fdiv = document.getElementById('fDivision')?.value||'';
   let tasks = visibleTasks();
-  if (q)  tasks = tasks.filter(t => (t.title||'').toLowerCase().includes(q) || (t.description||'').toLowerCase().includes(q));
-  if (fs) tasks = tasks.filter(t => t.status === fs);
-  if (fc) tasks = tasks.filter(t => t.criticality === fc);
-  if (fp) tasks = tasks.filter(t => t.project === fp);
-  if (ft) tasks = tasks.filter(t => t.type === ft);
+  if (q)    tasks = tasks.filter(t => (t.title||'').toLowerCase().includes(q) || (t.description||'').toLowerCase().includes(q));
+  if (fs)   tasks = tasks.filter(t => t.status === fs);
+  if (fc)   tasks = tasks.filter(t => t.criticality === fc);
+  if (fp)   tasks = tasks.filter(t => t.project === fp);
+  if (ft)   tasks = tasks.filter(t => t.type === ft);
+  if (fdiv) {
+    const divIds = new Set(getUsers().filter(u => u.division === fdiv).map(u => u.id));
+    tasks = tasks.filter(t => divIds.has(t.assignedTo));
+  }
 
   const now = new Date();
   const tbody = document.getElementById('taskTableBody');
@@ -3478,6 +3697,7 @@ function renderKanban() {
   const fp  = document.getElementById('kbProject')?.value || '';
   const fc  = document.getElementById('kbCrit')?.value    || '';
   const fu  = document.getElementById('kbPerson')?.value  || '';
+  const fdiv = document.getElementById('kbDivision')?.value || '';
 
   const tasks = visibleTasks();
   const users = getUsers().filter(u => u.id !== 'u0');
@@ -3508,16 +3728,27 @@ function renderKanban() {
         <option value="">All Criticalities</option>
         ${CRITICALITIES.map(c=>`<option${c===fc?' selected':''}>${c}</option>`).join('')}
       </select>
-      ${(fp||fu||fc)?`<button class="btn btn-ghost btn-sm" onclick="document.getElementById('kbProject').value='';document.getElementById('kbPerson').value='';document.getElementById('kbCrit').value='';renderKanban()">✕ Clear</button>`:''}
+      ${!getVisibleDivisions() ? `<select id="kbDivision" onchange="renderKanban()">
+        <option value=""${fdiv===''?' selected':''}>All Divisions</option>
+        <option value="pmo"${fdiv==='pmo'?' selected':''}>🏗️ PMO</option>
+        <option value="compliance"${fdiv==='compliance'?' selected':''}>📋 Compliance</option>
+        <option value="fm"${fdiv==='fm'?' selected':''}>🔧 FM</option>
+        <option value="executive"${fdiv==='executive'?' selected':''}>👔 Executive</option>
+      </select>` : ''}
+      ${(fp||fu||fc||fdiv)?`<button class="btn btn-ghost btn-sm" onclick="document.getElementById('kbProject').value='';document.getElementById('kbPerson').value='';document.getElementById('kbCrit').value='';if(document.getElementById('kbDivision'))document.getElementById('kbDivision').value='';renderKanban()">✕ Clear</button>`:''}
     </div>
     <div class="kanban-board" id="kanbanBoard"></div>
   `;
 
   // ── Apply filters (values already captured above, selects now restored via selected attr) ──
   let filtered = tasks;
-  if (fp) filtered = filtered.filter(t => t.project === fp);
-  if (fu) filtered = filtered.filter(t => t.assignedTo === fu || t.currentHolder === fu);
-  if (fc) filtered = filtered.filter(t => t.criticality === fc);
+  if (fp)   filtered = filtered.filter(t => t.project === fp);
+  if (fu)   filtered = filtered.filter(t => t.assignedTo === fu || t.currentHolder === fu);
+  if (fc)   filtered = filtered.filter(t => t.criticality === fc);
+  if (fdiv) {
+    const divIds = new Set(getUsers().filter(u => u.division === fdiv).map(u => u.id));
+    filtered = filtered.filter(t => divIds.has(t.assignedTo));
+  }
 
   const board = document.getElementById('kanbanBoard');
 
@@ -5813,9 +6044,17 @@ function deleteProject(pid) {
 
 function renderAnalytics() {
   const el = document.getElementById('viewAnalytics');
+  const divF = document.getElementById('anaDivFilter')?.value || '';
   el.innerHTML = `
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;flex-wrap:wrap;gap:8px;">
       <div class="page-title">Time Analytics</div>
+      ${!getVisibleDivisions() ? `<select id="anaDivFilter" onchange="renderAnalytics()" style="padding:6px 10px;border-radius:var(--radius);border:1px solid var(--border2);background:var(--bg2);color:var(--text1);font-size:13px;">
+        <option value=""${divF===''?' selected':''}>All Divisions</option>
+        <option value="pmo"${divF==='pmo'?' selected':''}>🏗️ PMO</option>
+        <option value="compliance"${divF==='compliance'?' selected':''}>📋 Compliance</option>
+        <option value="fm"${divF==='fm'?' selected':''}>🔧 FM</option>
+        <option value="executive"${divF==='executive'?' selected':''}>👔 Executive</option>
+      </select>` : ''}
     </div>
     <div class="page-sub">Hours logged across all tasks — select a project or person to drill down.</div>
     <div class="tabs" id="analyticsTabs">
@@ -5846,13 +6085,17 @@ function fmtH(h) { return h===0?'0h': (h%1===0?h+'h':parseFloat(h).toFixed(1)+'h
 
 // ── Build raw data ──
 function buildTimeData() {
+  const divF = document.getElementById('anaDivFilter')?.value || '';
+  const divIds = divF ? new Set(getUsers().filter(u => u.division === divF).map(u => u.id)) : null;
   const tasks  = getTasks();
   const byProj = {};
   const byPers = {};
   tasks.forEach(t => {
+    if (divIds && !divIds.has(t.assignedTo)) return;
     filterLogsByPeriod(t.timeLogs||[]).forEach(l => {
       const hrs = Number(l.hours)||0;
       if (!hrs) return;
+      if (divIds && !divIds.has(l.userId)) return;
       const pid = t.project, uid = l.userId;
       if (!byProj[pid]) byProj[pid] = { total:0, members:{} };
       byProj[pid].total += hrs;
