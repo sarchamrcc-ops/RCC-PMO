@@ -3688,7 +3688,7 @@ function renderNewTask() {
           </div>
           <div class="form-group">
             <label>Project *</label>
-            <select id="fProject">
+            <select id="ntProject">
               <option value="">— Select project —</option>
               ${getProjects().map(p=>`<option value="${p.id}">[${p.code}] ${p.name}</option>`).join('')}
             </select>
@@ -3697,15 +3697,15 @@ function renderNewTask() {
         <div class="form-row cols3">
           <div class="form-group">
             <label>Task Type *</label>
-            <select id="fType"><option value="">— Type —</option>${TASK_TYPES.map(t=>`<option>${t}</option>`).join('')}</select>
+            <select id="ntType"><option value="">— Type —</option>${TASK_TYPES.map(t=>`<option>${t}</option>`).join('')}</select>
           </div>
           <div class="form-group">
             <label>Criticality</label>
-            <select id="fCrit">${CRITICALITIES.map(c=>`<option>${c}</option>`)}</select>
+            <select id="ntCrit">${CRITICALITIES.map(c=>`<option>${c}</option>`)}</select>
           </div>
           <div class="form-group">
             <label>Status</label>
-            <select id="fStatus">${STATUSES.map(s=>`<option>${s}</option>`)}</select>
+            <select id="ntStatus">${STATUSES.map(s=>`<option>${s}</option>`)}</select>
           </div>
         </div>
         <div class="form-row cols3">
@@ -3860,10 +3860,10 @@ Return ONLY valid JSON, no markdown, no explanation.`;
 
 function fillForm(p) {
   if (p.title) document.getElementById('fTitle').value = p.title;
-  if (p.project_id) document.getElementById('fProject').value = p.project_id;
-  if (p.type) document.getElementById('fType').value = p.type;
-  if (p.criticality) document.getElementById('fCrit').value = p.criticality;
-  if (p.status) document.getElementById('fStatus').value = p.status;
+  if (p.project_id) document.getElementById('ntProject').value = p.project_id;
+  if (p.type) document.getElementById('ntType').value = p.type;
+  if (p.criticality) document.getElementById('ntCrit').value = p.criticality;
+  if (p.status) document.getElementById('ntStatus').value = p.status;
   if (p.assigned_to_id) document.getElementById('fAssignTo').value = p.assigned_to_id;
   if (p.assigned_by_id) document.getElementById('fAssignBy').value = p.assigned_by_id; // AI override
   if (p.client) document.getElementById('fClient').value = p.client;
@@ -3875,8 +3875,8 @@ function clearForm() { renderNewTask(); }
 
 function submitTask() {
   const title    = document.getElementById('fTitle').value.trim();
-  const project  = document.getElementById('fProject').value;
-  const type     = document.getElementById('fType').value;
+  const project  = document.getElementById('ntProject').value;
+  const type     = document.getElementById('ntType').value;
   const assignTo = document.getElementById('fAssignTo').value;
   const err      = document.getElementById('formErr');
 
@@ -3913,8 +3913,8 @@ function submitTask() {
     assignedTo:  assignTo || '',
     assignedBy:  document.getElementById('fAssignBy').value || amadaniId,
     client:      document.getElementById('fClient').value.trim(),
-    criticality: document.getElementById('fCrit').value || 'Normal',
-    status:      document.getElementById('fStatus').value || 'Backlog',
+    criticality: document.getElementById('ntCrit').value || 'Normal',
+    status:      document.getElementById('ntStatus').value || 'Backlog',
     createdAt:   Date.now(),
     dueDate:     document.getElementById('fDue').value || '',
     currentHolder: assignTo || '',
