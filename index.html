@@ -2034,88 +2034,18 @@ function drawCalendar() {
 // ACTIVITY LOG
 // ═══════════════════════════════════════════════════════════
 function showActivityLog(uid) {
-  const user  = getUsers().find(u => u.id === uid);
+  const user = getUsers().find(u => u.id === uid);
   if (!user) return;
-  const tasks = getTasks().filter(t =>
-    t.assignedTo === uid || t.currentHolder === uid || t.assignedBy === uid ||
-    (t.timeLogs||[]).some(l => l.userId === uid) ||
-    (t.updates||[]).some(u => u.userId === uid)
-  );
-
-  // Build a flat timeline of all events for this user
-  const events = [];
-
-  tasks.forEach(t => {
-    const proj = getProjects().find(p => p.id === t.project);
-    const label = `[${proj?.code || t.project || '—'}] ${t.title}`;
-
-    // Time log entries
-    (t.timeLogs||[]).filter(l => l.userId === uid).forEach(l => {
-      events.push({
-        ts:   new Date(l.date).getTime() || 0,
-        date: l.date,
-        icon: '⏱️',
-        color: '#2980b9',
-        taskId: t.id,
-        taskLabel: label,
-        text: `Logged ${l.hours}h${l.note ? ' — ' + l.note : ''}`,
-        type: 'timelog'
-      });
-    });
-
-    // Task update entries authored by this user
-    (t.updates||[]).filter(u => u.userId === uid).forEach(u => {
-      const isSystem = u.type === 'system';
-      events.push({
-        ts:   u.ts || 0,
-        date: u.ts ? new Date(u.ts).toLocaleDateString('en-GB') : '—',
-        icon: isSystem ? '🔧' : '💬',
-        color: isSystem ? '#7f8c8d' : '#8e44ad',
-        taskId: t.id,
-        taskLabel: label,
-        text: u.text || '',
-        type: isSystem ? 'system' : 'comment'
-      });
-    });
-  });
-
-  // Sort newest first
-  events.sort((a, b) => b.ts - a.ts);
-
-  const fmtDate = ts => {
-    if (!ts) return '—';
-    const d = new Date(ts);
-    return d.toLocaleDateString('en-GB', { day:'2-digit', month:'short', year:'numeric' }) +
-           ' ' + d.toLocaleTimeString('en-GB', { hour:'2-digit', minute:'2-digit' });
-  };
-
-  // Summary counts
-  const totalHours = tasks.reduce((s, t) =>
-    s + (t.timeLogs||[]).filter(l => l.userId === uid).reduce((a, l) => a + (Number(l.hours)||0), 0), 0);
-  const timelogCount  = events.filter(e => e.type === 'timelog').length;
-  const commentCount  = events.filter(e => e.type === 'comment').length;
-  const systemCount   = events.filter(e => e.type === 'system').length;
-
-  const rows = events.length === 0
-    ? `<tr><td colspan="4" style="text-align:center;padding:24px;color:var(--text3);">No activity recorded for this user.</td></tr>`
-    : events.map(e => `
-        <tr>
-          <td style="white-space:nowrap;font-size:11px;color:var(--text3);">${e.type === 'timelog' ? e.date : fmtDate(e.ts)}</td>
-          <td style="text-align:center;font-size:15px;">${e.icon}</td>
-          <td>
-            <button class="btn btn-ghost btn-xs" onclick="closeModal();openTask('${e.taskId}')" style="font-size:11px;padding:2px 6px;margin-bottom:2px;">${e.taskId}</button>
-            <div style="font-size:12px;color:var(--text2);">${escHtml(e.taskLabel)}</div>
-          </td>
-          <td style="font-size:12px;">${escHtml(e.text)}</td>
-        </tr>`).join('');
 
   const divColor = DIVISION_COLORS[user.division] || '#7f8c8d';
   const divLabel = DIVISION_LABELS[user.division] || user.division || '';
   const initials = user.name.split(' ').map(w=>w[0]).join('').slice(0,2).toUpperCase();
+  const avIdx    = parseInt(user.id.replace(/\D/g,'')) || 0;
 
+  // Show loading state immediately
   document.getElementById('taskModalContent').innerHTML = `
     <div class="modal-header" style="display:flex;align-items:center;gap:12px;">
-      <div class="user-avatar" style="width:38px;height:38px;font-size:14px;background:#C0392B;color:#fff;border-radius:50%;display:flex;align-items:center;justify-content:center;flex-shrink:0;">${initials}</div>
+      <div class="user-avatar av-${avIdx%7}" style="width:38px;height:38px;font-size:14px;">${initials}</div>
       <div style="flex:1;min-width:0;">
         <div class="modal-title" style="margin:0;">${escHtml(user.name)} — Activity Log</div>
         <div style="font-size:11px;color:var(--text3);">${escHtml(user.title||'')}
@@ -2124,26 +2054,176 @@ function showActivityLog(uid) {
       </div>
       <button class="modal-close" onclick="closeModal()">✕</button>
     </div>
-    <div class="modal-body" style="padding-top:12px;">
-      <div style="display:flex;gap:12px;margin-bottom:16px;flex-wrap:wrap;">
-        <div style="flex:1;min-width:100px;background:var(--bg3);border-radius:var(--radius);padding:10px 14px;text-align:center;">
-          <div style="font-size:20px;font-weight:700;color:var(--accent);">${fmtHours(totalHours)}</div>
-          <div style="font-size:11px;color:var(--text3);">Total Hours</div>
-        </div>
-        <div style="flex:1;min-width:100px;background:var(--bg3);border-radius:var(--radius);padding:10px 14px;text-align:center;">
-          <div style="font-size:20px;font-weight:700;color:#2980b9;">${timelogCount}</div>
-          <div style="font-size:11px;color:var(--text3);">Time Entries</div>
-        </div>
-        <div style="flex:1;min-width:100px;background:var(--bg3);border-radius:var(--radius);padding:10px 14px;text-align:center;">
-          <div style="font-size:20px;font-weight:700;color:#8e44ad;">${commentCount}</div>
-          <div style="font-size:11px;color:var(--text3);">Comments</div>
-        </div>
-        <div style="flex:1;min-width:100px;background:var(--bg3);border-radius:var(--radius);padding:10px 14px;text-align:center;">
-          <div style="font-size:20px;font-weight:700;color:var(--text3);">${systemCount}</div>
-          <div style="font-size:11px;color:var(--text3);">System Events</div>
+    <div class="modal-body" style="text-align:center;padding:40px;color:var(--text3);">
+      <div style="font-size:28px;margin-bottom:10px;">⏳</div>
+      <div>Loading activity data…</div>
+    </div>`;
+  document.getElementById('taskModal').classList.add('open');
+
+  // Load platform activity (async — may hit Firebase)
+  loadUserActivityLog(uid, function(platformEntries) {
+    _renderActivityLogModal(uid, user, platformEntries, initials, avIdx, divColor, divLabel);
+  });
+}
+
+function _renderActivityLogModal(uid, user, platformEntries, initials, avIdx, divColor, divLabel) {
+  const fmtDT = ts => {
+    if (!ts) return '—';
+    const d = new Date(ts);
+    return d.toLocaleDateString('en-GB', { day:'2-digit', month:'short', year:'numeric' }) +
+           ' ' + d.toLocaleTimeString('en-GB', { hour:'2-digit', minute:'2-digit' });
+  };
+  const fmtTime = ts => ts ? new Date(ts).toLocaleTimeString('en-GB', { hour:'2-digit', minute:'2-digit' }) : '—';
+  const fmtDateShort = ts => ts ? new Date(ts).toLocaleDateString('en-GB', { day:'2-digit', month:'short', year:'numeric' }) : '—';
+
+  // ── Platform Activity Stats ──────────────────────────────
+  const sessions   = groupIntoSessions(platformEntries);
+  const totalSessions  = sessions.length;
+  const totalPlatformMin = sessions.reduce((s, ses) => s + (ses.duration || 0), 0);
+  const lastLoginTs    = platformEntries.filter(e=>e.type==='login').sort((a,b)=>b.ts-a.ts)[0]?.ts || null;
+  const actionCount    = platformEntries.filter(e=>!['login','logout'].includes(e.type)).length;
+
+  const fmtMins = m => m >= 60 ? Math.floor(m/60) + 'h ' + (m%60) + 'm' : m + ' min';
+  const lastSeenStr = lastLoginTs ? fmtDateShort(lastLoginTs) : 'Never';
+
+  // ── Work Activity (task-based) ───────────────────────────
+  const allTasks = getTasks().filter(t =>
+    t.assignedTo === uid || t.currentHolder === uid || t.assignedBy === uid ||
+    (t.timeLogs||[]).some(l => l.userId === uid) ||
+    (t.updates||[]).some(u => u.userId === uid)
+  );
+  const workEvents = [];
+  allTasks.forEach(t => {
+    const proj  = getProjects().find(p => p.id === t.project);
+    const label = `[${proj?.code || t.project || '—'}] ${t.title}`;
+    (t.timeLogs||[]).filter(l => l.userId === uid).forEach(l => {
+      workEvents.push({ ts: new Date(l.date).getTime()||0, date: l.date, icon:'⏱️', taskId:t.id, taskLabel:label, text:`Logged ${l.hours}h${l.note?' — '+l.note:''}`, type:'timelog' });
+    });
+    (t.updates||[]).filter(u => u.userId === uid).forEach(u => {
+      workEvents.push({ ts: u.ts||0, icon: u.type==='system'?'🔧':'💬', taskId:t.id, taskLabel:label, text:u.text||'', type: u.type==='system'?'system':'comment' });
+    });
+  });
+  workEvents.sort((a,b) => b.ts - a.ts);
+  const totalHours     = allTasks.reduce((s,t) => s + (t.timeLogs||[]).filter(l=>l.userId===uid).reduce((a,l)=>a+(Number(l.hours)||0),0), 0);
+
+  // ── Sessions table rows ──────────────────────────────────
+  const sessionRows = sessions.length === 0
+    ? `<tr><td colspan="5" style="text-align:center;padding:24px;color:var(--text3);">No platform sessions recorded yet.<br><small>Sessions are recorded from this point forward.</small></td></tr>`
+    : sessions.map((ses, i) => {
+        const actionTypes = ses.events.filter(e=>!['login','logout'].includes(e.type));
+        const mostUsed = (() => {
+          const cnt = {}; actionTypes.forEach(e => { cnt[e.type] = (cnt[e.type]||0)+1; });
+          const top = Object.entries(cnt).sort((a,b)=>b[1]-a[1])[0];
+          return top ? `${top[0].replace('_',' ')} ×${top[1]}` : '—';
+        })();
+        const dur = ses.duration != null ? fmtMins(ses.duration) : ses.logoutTs ? fmtMins(Math.round((ses.logoutTs - ses.loginTs)/60000)) : '<span style="color:#27ae60;font-size:10px;">● Active</span>';
+        return `<tr>
+          <td style="font-size:11px;color:var(--text3);white-space:nowrap;">${fmtDateShort(ses.loginTs)}</td>
+          <td style="font-size:11px;white-space:nowrap;"><b>${fmtTime(ses.loginTs)}</b></td>
+          <td style="font-size:11px;white-space:nowrap;">${ses.logoutTs ? fmtTime(ses.logoutTs) : '<span style="color:#27ae60;">Still active</span>'}</td>
+          <td style="font-size:11px;font-weight:600;">${dur}</td>
+          <td style="font-size:11px;">${actionTypes.length} actions${mostUsed !== '—' ? '<br><span style="color:var(--text3);font-size:10px;">Top: ' + escHtml(mostUsed) + '</span>' : ''}</td>
+        </tr>`;
+      }).join('');
+
+  // ── Platform actions timeline ────────────────────────────
+  const recentActions = [...platformEntries].sort((a,b)=>b.ts-a.ts).slice(0,150);
+  const actionRows = recentActions.length === 0
+    ? `<tr><td colspan="3" style="text-align:center;padding:24px;color:var(--text3);">No actions recorded yet.</td></tr>`
+    : recentActions.map(e => {
+        const typeColors = { login:'#27ae60', logout:'#7f8c8d', view:'#2980b9', task_open:'#8e44ad', task_create:'#27ae60', task_edit:'#f0b429', task_delete:'#e74c3c', time_log:'#2980b9', comment:'#8e44ad', status_change:'#e67e22', task_transfer:'#16a085', export:'#2c3e50', report:'#2c3e50' };
+        const col = typeColors[e.type] || '#7f8c8d';
+        return `<tr>
+          <td style="white-space:nowrap;font-size:11px;color:var(--text3);">${fmtDT(e.ts)}</td>
+          <td><span style="display:inline-block;padding:1px 7px;border-radius:10px;font-size:10px;font-weight:600;background:${col}18;color:${col};border:1px solid ${col}33;">${e.type.replace(/_/g,' ')}</span></td>
+          <td style="font-size:12px;">${describeActivity(e)}</td>
+        </tr>`;
+      }).join('');
+
+  // ── Work activity rows ───────────────────────────────────
+  const workRows = workEvents.length === 0
+    ? `<tr><td colspan="4" style="text-align:center;padding:24px;color:var(--text3);">No work activity recorded.</td></tr>`
+    : workEvents.map(e => `
+        <tr>
+          <td style="white-space:nowrap;font-size:11px;color:var(--text3);">${e.type==='timelog' ? e.date : fmtDT(e.ts)}</td>
+          <td style="text-align:center;font-size:15px;">${e.icon}</td>
+          <td>
+            <button class="btn btn-ghost btn-xs" onclick="closeModal();openTask('${e.taskId}')" style="font-size:11px;padding:2px 6px;margin-bottom:2px;">${e.taskId}</button>
+            <div style="font-size:11px;color:var(--text2);">${escHtml(e.taskLabel)}</div>
+          </td>
+          <td style="font-size:12px;">${escHtml(e.text)}</td>
+        </tr>`).join('');
+
+  // ── Render full modal ────────────────────────────────────
+  document.getElementById('taskModalContent').innerHTML = `
+    <div class="modal-header" style="display:flex;align-items:center;gap:12px;">
+      <div class="user-avatar av-${avIdx%7}" style="width:38px;height:38px;font-size:14px;">${initials}</div>
+      <div style="flex:1;min-width:0;">
+        <div class="modal-title" style="margin:0;">${escHtml(user.name)} — Activity Log</div>
+        <div style="font-size:11px;color:var(--text3);">${escHtml(user.title||'')}
+          ${divLabel ? `<span style="margin-left:6px;padding:1px 7px;border-radius:10px;font-size:10px;font-weight:600;background:${divColor}22;color:${divColor};border:1px solid ${divColor}44;">${divLabel}</span>` : ''}
         </div>
       </div>
-      <div style="overflow-x:auto;max-height:420px;overflow-y:auto;">
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body" style="padding-top:10px;">
+
+      <!-- ── Summary Stats Strip ── -->
+      <div style="display:flex;gap:10px;margin-bottom:14px;flex-wrap:wrap;">
+        <div style="flex:1;min-width:90px;background:var(--bg3);border-radius:var(--radius);padding:10px 12px;text-align:center;">
+          <div style="font-size:18px;font-weight:700;color:#27ae60;">${totalSessions}</div>
+          <div style="font-size:10px;color:var(--text3);">Login Sessions</div>
+        </div>
+        <div style="flex:1;min-width:90px;background:var(--bg3);border-radius:var(--radius);padding:10px 12px;text-align:center;">
+          <div style="font-size:18px;font-weight:700;color:#2980b9;">${totalPlatformMin > 0 ? fmtMins(totalPlatformMin) : '—'}</div>
+          <div style="font-size:10px;color:var(--text3);">Total Time</div>
+        </div>
+        <div style="flex:1;min-width:90px;background:var(--bg3);border-radius:var(--radius);padding:10px 12px;text-align:center;">
+          <div style="font-size:18px;font-weight:700;color:#8e44ad;">${actionCount}</div>
+          <div style="font-size:10px;color:var(--text3);">Platform Actions</div>
+        </div>
+        <div style="flex:1;min-width:90px;background:var(--bg3);border-radius:var(--radius);padding:10px 12px;text-align:center;">
+          <div style="font-size:18px;font-weight:700;color:var(--accent);">${fmtHours(totalHours)}</div>
+          <div style="font-size:10px;color:var(--text3);">Hours Logged</div>
+        </div>
+        <div style="flex:1;min-width:90px;background:var(--bg3);border-radius:var(--radius);padding:10px 12px;text-align:center;">
+          <div style="font-size:13px;font-weight:700;color:var(--text2);">${lastSeenStr}</div>
+          <div style="font-size:10px;color:var(--text3);">Last Login</div>
+        </div>
+      </div>
+
+      <!-- ── Tabs ── -->
+      <div class="tabs" style="margin-bottom:12px;" id="actLogTabs">
+        <button class="tab active" onclick="_actTab('sessions',this)">🔑 Sessions (${totalSessions})</button>
+        <button class="tab" onclick="_actTab('actions',this)">⚡ Platform Actions (${actionCount})</button>
+        <button class="tab" onclick="_actTab('work',this)">📋 Work Activity (${workEvents.length})</button>
+      </div>
+
+      <!-- ── Sessions panel ── -->
+      <div id="actPanel_sessions" style="overflow-x:auto;max-height:380px;overflow-y:auto;">
+        <table class="task-table" style="font-size:12px;min-width:420px;">
+          <thead><tr>
+            <th>Date</th><th>Login</th><th>Logout</th><th>Duration</th><th>Actions</th>
+          </tr></thead>
+          <tbody>${sessionRows}</tbody>
+        </table>
+        ${platformEntries.length === 0 ? `<p style="font-size:11px;color:var(--text3);padding:8px;margin:0;">💡 Activity tracking starts from when the user next logs in. Data is stored per-browser and synced to Firebase.</p>` : ''}
+      </div>
+
+      <!-- ── Actions panel (hidden) ── -->
+      <div id="actPanel_actions" style="display:none;overflow-x:auto;max-height:380px;overflow-y:auto;">
+        <table class="task-table" style="font-size:12px;">
+          <thead><tr>
+            <th style="width:140px;">Date &amp; Time</th>
+            <th style="width:110px;">Type</th>
+            <th>Description</th>
+          </tr></thead>
+          <tbody>${actionRows}</tbody>
+        </table>
+      </div>
+
+      <!-- ── Work activity panel (hidden) ── -->
+      <div id="actPanel_work" style="display:none;overflow-x:auto;max-height:380px;overflow-y:auto;">
         <table class="task-table" style="font-size:12px;">
           <thead><tr>
             <th style="width:110px;">Date</th>
@@ -2151,22 +2231,32 @@ function showActivityLog(uid) {
             <th>Task</th>
             <th>Activity</th>
           </tr></thead>
-          <tbody>${rows}</tbody>
+          <tbody>${workRows}</tbody>
         </table>
       </div>
+
     </div>
-    <div class="modal-footer">
+    <div class="modal-footer" style="justify-content:space-between;">
+      <div style="font-size:10px;color:var(--text3);">🔄 Synced from Firebase · ${platformEntries.length} raw events stored</div>
       <button class="btn btn-ghost" onclick="closeModal()">Close</button>
     </div>
   `;
-  document.getElementById('taskModal').classList.add('open');
+}
+
+function _actTab(name, btn) {
+  document.querySelectorAll('#actLogTabs .tab').forEach(t => t.classList.remove('active'));
+  btn.classList.add('active');
+  ['sessions','actions','work'].forEach(p => {
+    const el = document.getElementById('actPanel_' + p);
+    if (el) el.style.display = p === name ? '' : 'none';
+  });
 }
 
 // ═══════════════════════════════════════════════════════════
 async function exportEmployeeExcel(uid) {
   const user = getUsers().find(u=>u.id===uid);
   if (!user) return;
-
+  trackActivity('export', { forUid: uid, forName: user.name });
   try { await ensureXLSX(); } catch(e) { toast('Could not load Excel engine.','error'); return; }
 
   const tasks    = visibleTasks().filter(t=>t.assignedTo===uid);
@@ -2374,6 +2464,7 @@ function importProjectList() {
 
 async function generatePDFReport() {
   toast('Generating PDF report…', 'info');
+  trackActivity('report', {});
 
   // Load jsPDF
   async function ensureJsPDF() {
@@ -2752,6 +2843,126 @@ const RCC_LOGO_B64 = "data:image/jpeg;base64,/9j/4QDKRXhpZgAATU0AKgAAAAgABgESAAM
 
 const STORAGE_KEYS = { users:'pmo_users_v5', tasks:'pmo_tasks_v6', session:'pmo_session_v5', apikey:'pmo_apikey', provider:'pmo_provider', projects:'pmo_projects_v6' };
 
+// ═══════════════════════════════════════════════════════════
+// PLATFORM ACTIVITY TRACKING
+// Tracks login/logout sessions, time spent, and all platform
+// actions per user. Stored locally + pushed to Firebase so
+// admins can review any user's platform behaviour.
+// ═══════════════════════════════════════════════════════════
+let _currentSessionId = null;
+let _sessionStartTs   = null;
+
+function _genId() {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
+}
+
+// Per-user local storage key
+function _actKey(uid) { return 'pmo_act_v1_' + uid; }
+
+// Load activity entries for a given user from localStorage
+function getPlatformActivity(uid) {
+  try { return JSON.parse(localStorage.getItem(_actKey(uid)) || '[]'); } catch(e) { return []; }
+}
+
+// Record a platform action for the current user
+function trackActivity(type, detail) {
+  if (!currentUser || !_currentSessionId) return;
+  const entry = {
+    id:   _genId(),
+    uid:  currentUser.id,
+    sid:  _currentSessionId,
+    ts:   Date.now(),
+    type,
+    d:    detail || {}
+  };
+  const arr = getPlatformActivity(currentUser.id);
+  arr.push(entry);
+  if (arr.length > 600) arr.splice(0, arr.length - 600); // cap per user
+  localStorage.setItem(_actKey(currentUser.id), JSON.stringify(arr));
+  // Push to Firebase so admin can read it
+  _pushActivityToFirebase(currentUser.id, arr);
+}
+
+function _pushActivityToFirebase(uid, arr) {
+  if (!_syncEnabled || !_fbDb) return;
+  try { _fbDb.ref('pmo/activity/' + uid).set({ d: JSON.stringify(arr) }); } catch(e){}
+}
+
+// Load activity for any user — Firebase first, then local fallback
+function loadUserActivityLog(uid, callback) {
+  if (_syncEnabled && _fbDb) {
+    try {
+      _fbDb.ref('pmo/activity/' + uid).once('value', snap => {
+        const val = snap.val();
+        if (val && typeof val.d === 'string') {
+          try { return callback(JSON.parse(val.d)); } catch(e) {}
+        }
+        callback(getPlatformActivity(uid));
+      });
+      return;
+    } catch(e) {}
+  }
+  callback(getPlatformActivity(uid));
+}
+
+// View name display labels
+const VIEW_LABELS = {
+  dashboard:     '📊 Dashboard',
+  tasks:         '📋 Tasks List',
+  kanban:        '📌 Kanban Board',
+  calendar:      '📅 Calendar',
+  new:           '✅ New Task Form',
+  bulk:          '📦 Bulk Import',
+  admin:         '⚙️ Admin Panel',
+  profile:       '👤 My Profile',
+  settings:      '🔧 Settings',
+  analytics:     '📈 Analytics',
+  people:        '👥 People Directory',
+  employee:      '👤 Employee Profile',
+  projectList:   '📁 Projects List',
+  projectDetail: '📁 Project Detail'
+};
+
+// Human-readable description for each tracked event
+function describeActivity(e) {
+  switch(e.type) {
+    case 'login':         return '🔑 Logged into the platform';
+    case 'logout':        return `🚪 Session ended${e.d.duration != null ? ' — ' + e.d.duration + ' min active' : ''}`;
+    case 'view':          return `👁 Navigated to ${VIEW_LABELS[e.d.view] || e.d.view}`;
+    case 'task_open':     return `📋 Opened task ${e.d.taskId}${e.d.title ? ' — ' + escHtml(e.d.title.slice(0,45)) : ''}`;
+    case 'task_create':   return `✅ Created task ${e.d.taskId}${e.d.title ? ' — ' + escHtml(e.d.title.slice(0,45)) : ''}`;
+    case 'task_edit':     return `✏️ Edited task ${e.d.taskId}${e.d.title ? ' — ' + escHtml(e.d.title.slice(0,45)) : ''}`;
+    case 'task_delete':   return `🗑️ Deleted task ${e.d.taskId}${e.d.title ? ' — ' + escHtml(e.d.title.slice(0,45)) : ''}`;
+    case 'time_log':      return `⏱️ Logged ${e.d.hours}h on ${e.d.taskId} (${e.d.date||''})`;
+    case 'comment':       return `💬 Posted update on ${e.d.taskId}`;
+    case 'status_change': return `🔄 Changed status on ${e.d.taskId} → <b>${escHtml(e.d.status||'')}</b>`;
+    case 'task_transfer': return `🔀 Transferred ${e.d.taskId} to ${escHtml(e.d.toName||'')}`;
+    case 'export':        return `📤 Exported Excel${e.d.forName ? ' for ' + escHtml(e.d.forName) : ''}`;
+    case 'report':        return `📄 Generated PDF report`;
+    case 'project_edit':  return `📁 Edited project`;
+    default:              return escHtml(e.type);
+  }
+}
+
+// Group flat activity entries into sessions
+function groupIntoSessions(entries) {
+  const map = {};
+  entries.forEach(e => {
+    if (!map[e.sid]) map[e.sid] = { sid: e.sid, events: [], loginTs: null, logoutTs: null, duration: null };
+    map[e.sid].events.push(e);
+    if (e.type === 'login')  { map[e.sid].loginTs = e.ts; }
+    if (e.type === 'logout') { map[e.sid].logoutTs = e.ts; map[e.sid].duration = e.d.duration; }
+  });
+  // Sort sessions newest first; infer login time from first event if missing
+  return Object.values(map)
+    .map(s => {
+      s.events.sort((a,b) => a.ts - b.ts);
+      if (!s.loginTs && s.events.length) s.loginTs = s.events[0].ts;
+      return s;
+    })
+    .sort((a,b) => (b.loginTs||0) - (a.loginTs||0));
+}
+
 // On first load with new version, wipe stale keys and migrate tasks
 (function() {
   if (localStorage.getItem('pmo_app_version') !== APP_VERSION) {
@@ -2851,6 +3062,11 @@ function initFirebaseSync() {
 
     updateSyncStatus('🟢 Synced');
     setTimeout(initPresence, 800); // start online-presence tracking
+    // Push current user's buffered activity (including login event) to Firebase
+    if (currentUser) {
+      const acts = getPlatformActivity(currentUser.id);
+      if (acts.length) _pushActivityToFirebase(currentUser.id, acts);
+    }
   } catch(e) {
     console.warn('Firebase sync error:', e);
     _syncEnabled = false;
@@ -3148,17 +3364,30 @@ function doLogin() {
   const user = users.find(x => x.username === u && x.password === p);
   if (!user) { document.getElementById('loginErr').style.display = 'block'; return; }
   currentUser = user;
+  _currentSessionId = _genId();
+  _sessionStartTs   = Date.now();
   save(STORAGE_KEYS.session, user.id);
   document.getElementById('loginErr').style.display = 'none';
   document.getElementById('loginScreen').style.display = 'none';
   document.getElementById('app').classList.add('visible');
+  // Record login event to localStorage immediately (Firebase push happens after initFirebaseSync)
+  trackActivity('login', {});
   if (user.forceChange) { showForceChangeModal(); }
   else { initApp(); }
   setTimeout(initFirebaseSync, 500);
 }
 
 function doLogout() {
+  const duration = _sessionStartTs ? Math.round((Date.now() - _sessionStartTs) / 60000) : 0;
+  trackActivity('logout', { duration });
+  // Ensure latest activity (including logout) is pushed to Firebase before reload
+  if (_syncEnabled && _fbDb && currentUser) {
+    const acts = getPlatformActivity(currentUser.id);
+    _pushActivityToFirebase(currentUser.id, acts);
+  }
   currentUser = null;
+  _currentSessionId = null;
+  _sessionStartTs   = null;
   localStorage.removeItem(STORAGE_KEYS.session);
   location.reload();
 }
@@ -3331,6 +3560,8 @@ function showView(v) {
   if (nb) nb.classList.add('active');
   const renders = { dashboard: renderDashboard, tasks: renderTasks, kanban: renderKanban, calendar: renderCalendar, new: renderNewTask, bulk: renderBulk, admin: renderAdmin, profile: renderProfile, settings: renderSettings, analytics: renderAnalytics, people: renderPeople, employee: renderEmployee, projectList: renderProjectList, projectDetail: renderProjectDetail };
   if (renders[v]) renders[v]();
+  // Track navigation (skip 'employee' to avoid noise on every people-click)
+  if (v !== 'employee') trackActivity('view', { view: v });
 }
 
 function cap(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
@@ -4159,6 +4390,7 @@ function submitTask() {
   };
   tasks.push(task);
   saveTasks(tasks);
+  trackActivity('task_create', { taskId: newId, title });
   // Send email notification to assignee
   sendTaskNotificationEmail(newId, 'assigned');
   if (missing.length > 0) {
@@ -4176,6 +4408,7 @@ function openTask(id) {
   const tasks = getTasks();
   const t = tasks.find(x => x.id === id);
   if (!t) return;
+  trackActivity('task_open', { taskId: id, title: t.title });
   renderTaskModal(t);
   document.getElementById('taskModal').classList.add('open');
 }
@@ -4504,10 +4737,11 @@ function addUpdate(taskId) {
   const idx = tasks.findIndex(t=>t.id===taskId);
   if (idx === -1) return;
   const updates = [];
-  if (text) updates.push({ userId: currentUser.id, text, ts: Date.now(), type:'user' });
+  if (text) { updates.push({ userId: currentUser.id, text, ts: Date.now(), type:'user' }); trackActivity('comment', { taskId }); }
   if (newStatus && newStatus !== tasks[idx].status) {
     updates.push({ userId: currentUser.id, text:`Status changed to "${newStatus}".`, ts: Date.now(), type:'system' });
     tasks[idx].status = newStatus;
+    trackActivity('status_change', { taskId, status: newStatus });
   }
   tasks[idx].updates = [...(tasks[idx].updates||[]), ...updates];
   saveTasks(tasks);
@@ -4535,6 +4769,7 @@ function logTime(taskId) {
     : `Logged ${hours}h on ${date}${note?' — '+note:''}`;
   tasks[idx].updates.push({ userId: currentUser.id, text: logNote, ts: Date.now(), type:'system' });
   saveTasks(tasks);
+  trackActivity('time_log', { taskId, hours, date });
   toast(`${hours}h logged${logUserId!==currentUser.id?' for '+logUser?.name:''}.`, 'success');
   renderTaskModal(tasks[idx]);
   // switch to time log tab on right panel
@@ -4601,6 +4836,7 @@ function saveTaskEdit(taskId) {
       : 'Task details updated.',
     ts: Date.now(), type:'system' });
   saveTasks(tasks);
+  trackActivity('task_edit', { taskId, title: tasks[idx].title });
   toast(stillMissing.length > 0 ? 'Saved — still missing: ' + stillMissing.join(', ') : 'Changes saved.', stillMissing.length > 0 ? 'error' : 'success');
   closeModal();
 }
@@ -4608,6 +4844,8 @@ function saveTaskEdit(taskId) {
 function deleteTask(taskId) {
   if (!confirm('Delete this task? This cannot be undone.')) return;
   let tasks = getTasks();
+  const t = tasks.find(x => x.id === taskId);
+  trackActivity('task_delete', { taskId, title: t?.title || taskId });
   tasks = tasks.filter(t=>t.id!==taskId);
   saveTasks(tasks);
   toast('Task deleted.', 'success');
@@ -4965,6 +5203,10 @@ document.getElementById('loginPass').addEventListener('keydown', e => { if (e.ke
     const user = getUsers().find(u=>u.id===sid);
     if (user) {
       currentUser = user;
+      // Restore session tracking (page refresh = continuation of presence)
+      _currentSessionId = _genId();
+      _sessionStartTs   = Date.now();
+      trackActivity('login', { resumed: true });
       document.getElementById('loginScreen').style.display = 'none';
       document.getElementById('app').classList.add('visible');
       initApp();
