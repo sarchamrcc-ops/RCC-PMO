@@ -4324,6 +4324,20 @@ function renderNewTask() {
         </div>
         <div class="form-row">
           <div class="form-group">
+            <label>Progress % <span style="color:var(--text3);font-size:10px;">(0–100)</span></label>
+            <div style="display:flex;align-items:center;gap:10px;max-width:380px;">
+              <input type="number" id="fProgress" min="0" max="100" step="5" placeholder="0"
+                style="width:80px;"
+                oninput="var v=Math.min(100,Math.max(0,parseInt(this.value)||0));document.getElementById('fProgressBar').style.width=v+'%';document.getElementById('fProgressLbl').textContent=v+'%';">
+              <div style="flex:1;background:var(--bg4);border-radius:4px;height:10px;overflow:hidden;">
+                <div id="fProgressBar" style="height:100%;background:linear-gradient(90deg,#27ae60,#34c97b);border-radius:4px;width:0%;transition:width .2s;"></div>
+              </div>
+              <span id="fProgressLbl" style="font-size:12px;color:var(--green);font-weight:600;min-width:34px;">0%</span>
+            </div>
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
             <label>Description</label>
             <textarea id="fDesc" placeholder="Full task description, scope, deliverables…"></textarea>
           </div>
@@ -4506,6 +4520,7 @@ function submitTask() {
       ? 'Task created with missing fields: ' + missing.join(', ') + '. Needs completion.'
       : 'Task created.', ts: Date.now(), type:'system' }],
     wbs: document.getElementById('fWbs').value.trim(),
+    progress: Math.min(100, Math.max(0, parseInt(document.getElementById('fProgress')?.value) || 0)),
   };
   tasks.push(task);
   saveTasks(tasks);
@@ -7229,7 +7244,7 @@ function renderDailyLog(targetUid, targetDate) {
       </div>
     </div>
     <div class="page-sub" style="margin-bottom:16px;">
-      Select tasks from the dropdown — or choose <strong>✏️ Type manually…</strong> to add a new task on the fly · fill in hours, progress &amp; notes · Save syncs everything to the task records.
+      Select tasks from the dropdown — or choose <strong>✏️ Type a new task…</strong> to add one on the fly · fill in hours, progress &amp; notes · Save syncs everything to the task records.
     </div>
 
     ${readonlyBanner}
@@ -7364,9 +7379,16 @@ function buildDailyLogRow(rowNum, task, allUserTasks, projects, uid, date, canEd
   // For a blank row: all userTasks not already logged (unlogged tasks), plus a placeholder
   const unloggedTasks = allUserTasks; // show all so user can re-select
   const taskOptsHtml = (canEdit
-    ? `<option value="">— Select task —</option>` + allUserTasks.map(t =>
-        `<option value="${t.id}"${tid && t.id===tid?' selected':''}>${escHtml(t.title)}</option>`
-      ).join('') + `<option value="__custom__" style="font-style:italic;">✏️ Type manually…</option>`
+    ? `<option value="">— Select task —</option>` + (() => {
+        // Deduplicate by title: keep first occurrence (earliest task ID), show title once
+        const seen = new Set();
+        return allUserTasks.filter(t => {
+          const key = t.title.trim().toLowerCase();
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        }).map(t => `<option value="${t.id}"${tid && t.id===tid?' selected':''}>${escHtml(t.title)}</option>`).join('');
+      })() + `<option value="__custom__" style="font-style:italic;color:var(--accent);">✏️ Type a new task…</option>`
     : '');
 
   if (!canEdit) {
@@ -7401,9 +7423,9 @@ function buildDailyLogRow(rowNum, task, allUserTasks, projects, uid, date, canEd
         onchange="dlOnTaskSelect(this,'${uid}','${date}')" style="width:100%;min-width:190px;">
         ${taskOptsHtml}
       </select>
-      <input type="text" id="dlcustom_${tid||'b'+rowNum}" data-field="customTitle"
-        placeholder="Enter task title…" class="dl-input"
-        style="display:none;margin-top:5px;width:100%;box-sizing:border-box;font-style:italic;"
+      <input type="text" id="dlcustom_blank_${rowNum}" data-field="customTitle"
+        placeholder="Type new task name…" class="dl-input"
+        style="display:none;margin-top:5px;width:100%;box-sizing:border-box;border:2px solid var(--accent);border-radius:var(--radius);padding:5px 8px;font-size:12px;background:var(--bg2);color:var(--text);"
         oninput="dlUpdateSummary()">
       ${tid ? `<div style="font-size:9px;color:var(--text3);margin-top:2px;">${tid} · <span class="badge badge-${(status||'').toLowerCase().replace(/\s/g,'')}" style="font-size:9px;padding:1px 4px;">${status}</span></div>` : ''}
     </td>
@@ -7489,9 +7511,13 @@ function dlOnTaskSelect(sel, uid, date) {
   if (tid === '__custom__') {
     tr.dataset.taskid  = '__custom__';
     sel.dataset.taskid = '__custom__';
-    // Show the text input and focus it
-    const customEl = document.getElementById('dlcustom_' + bn);
-    if (customEl) { customEl.style.display = ''; customEl.focus(); customEl.dataset.taskid = '__custom__'; }
+    // Show the text input — ID is always dlcustom_blank_N (blank rows only ever get custom)
+    const customEl = tr.querySelector('[data-field="customTitle"]');
+    if (customEl) {
+      customEl.style.display = '';
+      customEl.dataset.taskid = '__custom__';
+      customEl.focus();
+    }
     // Clear project display cells
     ['dlprojname_','dlprojnum_','dlprojcode_'].forEach(pre => {
       const el = document.getElementById(pre + bn);
@@ -7537,7 +7563,7 @@ function dlOnTaskSelect(sel, uid, date) {
     const stEl = document.getElementById('dlstatus_' + bn);
     if (stEl) { stEl.innerHTML = '<option>—</option>'; stEl.style.opacity='.4'; stEl.style.pointerEvents='none'; stEl.dataset.taskid=''; }
     // Hide/clear the custom text input
-    const customEl = document.getElementById('dlcustom_' + bn);
+    const customEl = tr.querySelector('[data-field="customTitle"]');
     if (customEl) { customEl.style.display = 'none'; customEl.value = ''; customEl.dataset.taskid = ''; }
     tr.classList.remove('dl-has-hours');
     const badge = tr.querySelector('.dl-task-badge');
@@ -7566,7 +7592,7 @@ function dlOnTaskSelect(sel, uid, date) {
   const suffix = oldId.replace('dlrow_','');
 
   // Hide custom input if it was previously shown
-  const customEl = document.getElementById('dlcustom_' + suffix);
+  const customEl = tr.querySelector('[data-field="customTitle"]');
   if (customEl) { customEl.style.display = 'none'; customEl.value = ''; }
 
   // Update dataset and row id
