@@ -751,11 +751,32 @@ function getVisibleDivisions() {
   return [div];
 }
 
+// Returns a Set of all user IDs that (directly or indirectly) report to userId
+function getSubordinateIds(userId) {
+  const users = getUsers();
+  const result = new Set();
+  function collect(uid) {
+    users.filter(u => u.reportsTo === uid).forEach(u => {
+      if (!result.has(u.id)) { result.add(u.id); collect(u.id); }
+    });
+  }
+  collect(userId);
+  return result;
+}
+
+// Returns true if the current user is the head of their division (not a super-admin)
+function isDivisionManager() {
+  if (!currentUser) return false;
+  if (!currentUser.division || currentUser.division === 'all') return false;
+  // Grade <= 2 or explicit head roles covers FM Manager, Compliance Manager, CDO, etc.
+  return currentUser.grade <= 2 || ['fm','om','cdo'].includes(currentUser.role);
+}
+
 function renderPeople() {
   const el = document.getElementById('viewPeople');
   const allUsers = getUsers();
   const tasks = visibleTasks();
-  const allowedDivs = getVisibleDivisions();
+  const allowedDivs = getVisibleDivisions(); // null = super-admin / COO; array = division-scoped
 
   // Compute hours per user
   const hoursById = {};
@@ -768,10 +789,24 @@ function renderPeople() {
   // Get current division filter from UI (if exists)
   const divFilter = document.getElementById('peopleDivFilter')?.value || '';
 
-  // Filter users by division access and UI filter
+  // Build the visible user ID set for regular (non-manager) users
+  // Super admins / COO: allowedDivs === null → see everyone
+  // Division managers: see their whole division (allowedDivs already handles this)
+  // Regular users: see only themselves + their subordinates
+  let visibleUserIds = null; // null = no further restriction beyond division
+  if (allowedDivs && !isDivisionManager()) {
+    const subs = getSubordinateIds(currentUser.id);
+    subs.add(currentUser.id);
+    visibleUserIds = subs;
+  }
+
+  // Filter users by division access, individual visibility, and UI filter
   let filteredUsers = allUsers.filter(u => u.id !== 'u0');
   if (allowedDivs) {
     filteredUsers = filteredUsers.filter(u => allowedDivs.includes(u.division));
+  }
+  if (visibleUserIds) {
+    filteredUsers = filteredUsers.filter(u => visibleUserIds.has(u.id));
   }
   if (divFilter) {
     filteredUsers = filteredUsers.filter(u => u.division === divFilter);
@@ -4670,9 +4705,25 @@ function renderTaskModal(t) {
             <input type="text" id="eFClient" value="${escHtml(t.client||'')}" style="width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:var(--radius);padding:8px 12px;font-family:var(--font);font-size:13px;outline:none;" onfocus="this.style.borderColor='#C0392B'" onblur="this.style.borderColor='var(--border)'">
           </div>
 
-          <div class="form-group" style="margin-bottom:16px;">
+          <div class="form-group" style="margin-bottom:12px;">
             <label>Description</label>
             <textarea id="eFDesc" style="width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:var(--radius);padding:8px 12px;font-family:var(--font);font-size:13px;outline:none;resize:vertical;min-height:90px;" onfocus="this.style.borderColor='#C0392B'" onblur="this.style.borderColor='var(--border)'">${escHtml(t.description||'')}</textarea>
+          </div>
+
+          <div class="form-group" style="margin-bottom:16px;">
+            <label>Progress % <span style="font-size:10px;color:var(--text3);">(0–100)</span></label>
+            <div style="display:flex;gap:10px;align-items:center;">
+              <input type="number" id="eFProgress" min="0" max="100" step="5"
+                value="${t.progress !== undefined ? t.progress : 0}"
+                ${canEdit ? '' : 'disabled'}
+                style="width:72px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:var(--radius);padding:7px 10px;font-family:var(--font);font-size:13px;outline:none;${canEdit?'':'opacity:0.65;cursor:default;'}"
+                ${canEdit ? "onfocus=\"this.style.borderColor='#C0392B'\" onblur=\"this.style.borderColor='var(--border)'\"" : ''}
+                oninput="var v=Math.min(100,Math.max(0,parseInt(this.value)||0));var b=document.getElementById('eFProgressBar');var l=document.getElementById('eFProgressLbl');if(b)b.style.width=v+'%';if(l)l.textContent=v+'%';">
+              <div style="flex:1;height:7px;background:var(--bg4);border-radius:4px;overflow:hidden;">
+                <div id="eFProgressBar" style="height:100%;background:linear-gradient(90deg,#27ae60,#34c97b);border-radius:4px;width:${t.progress||0}%;transition:width .25s;"></div>
+              </div>
+              <span id="eFProgressLbl" style="font-size:13px;color:var(--green);font-weight:700;min-width:36px;text-align:right;">${t.progress||0}%</span>
+            </div>
           </div>
 
           <div style="display:flex;gap:8px;">
