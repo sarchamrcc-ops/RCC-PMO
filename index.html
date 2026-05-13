@@ -15,8 +15,10 @@
   <meta name="application-name" content="RCC-PMO">
   <script src="https://cdn.jsdelivr.net/npm/@emailjs/browser@4/dist/email.min.js" crossorigin="anonymous"></script>
   <!-- Firebase Realtime Database — hardcoded, zero-config for all users -->
-  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
-  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
+  <!-- Firebase — jsDelivr CDN (gstatic.com unreachable on this network) -->
+  <script src="https://cdn.jsdelivr.net/npm/firebase@9.23.0/firebase-app-compat.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/firebase@9.23.0/firebase-auth-compat.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/firebase@9.23.0/firebase-database-compat.js"></script>
   <meta name="description" content="Al Rugaib Construction Co. — PMO Task Management">
   <meta name="theme-color" content="#C0392B">
   <meta name="mobile-web-app-capable" content="yes">
@@ -3237,7 +3239,70 @@ const _FB_CONFIG = {
   appId:             "1:414571833584:web:fe8b1f3fb68e451f943a35"
 };
 
-let _fbApp = null, _fbDb = null, _syncEnabled = false, _isSyncing = false;
+let _fbApp = null, _fbDb = null, _fbAuth = null, _syncEnabled = false, _isSyncing = false;
+
+// ── Firebase Auth helpers ────────────────────────────────────────────────────
+function usernameToEmail(u) { return u.trim().toLowerCase() + '@rcc-pmo.local'; }
+function emailToUsername(e) { return (e || '').replace('@rcc-pmo.local', '').toLowerCase(); }
+function mapAuthError(code) {
+  return ({ 'auth/invalid-credential':'Invalid username or password.', 'auth/wrong-password':'Invalid username or password.', 'auth/user-not-found':'Invalid username or password.', 'auth/too-many-requests':'Too many attempts. Try again later.', 'auth/network-request-failed':'Network error. Check your connection.', 'auth/requires-recent-login':'Session expired. Please log out and log in again.' })[code] || 'Authentication error. Please try again.';
+}
+
+// Initialise Firebase App + DB + Auth once CDN globals are ready.
+// onAuthStateChanged is a BACKUP restore path only — the legacy localStorage
+// session restore IIFE (below) remains the primary path and runs first.
+function initFirebase() {
+  try {
+    if (!_fbApp) _fbApp = firebase.initializeApp(_FB_CONFIG, 'rcc-pmo-sync');
+    if (!_fbDb)   _fbDb   = firebase.database(_fbApp);
+    if (!_fbAuth) _fbAuth = firebase.auth(_fbApp);
+    _fbAuth.onAuthStateChanged(function(fbUser) {
+      if (fbUser && !currentUser) {
+        // Firebase Auth token present but no local session — restore from it
+        const uname = emailToUsername(fbUser.email);
+        const user = getUsers().find(u => u.username === uname) || DEFAULT_USERS.find(u => u.username === uname);
+        if (user) {
+          currentUser = user;
+          save(STORAGE_KEYS.session, user.id);
+          onWebLogin(true);
+          document.getElementById('loginScreen').style.display = 'none';
+          document.getElementById('app').classList.add('visible');
+          if (user.forceChange) showForceChangeModal(); else initApp();
+          setTimeout(initFirebaseSync, 500);
+        }
+      }
+      // If currentUser already set (by legacy restore/login), do nothing
+    });
+  } catch(e) { console.warn('Firebase Auth init error:', e); }
+}
+
+// Silent Firebase Auth sign-in — called after successful legacy login.
+// Non-blocking: app is already shown; this just builds up the Auth account
+// in the background so DB rules can eventually be locked down.
+async function _fbSignInSilently(u, p) {
+  if (!_fbAuth) return;
+  try {
+    await _fbAuth.signInWithEmailAndPassword(usernameToEmail(u), p);
+  } catch(err) {
+    if (err.code === 'auth/user-not-found' || err.code === 'auth/invalid-credential') {
+      try { await _fbAuth.createUserWithEmailAndPassword(usernameToEmail(u), p); } catch(e) { /* silent */ }
+    }
+  }
+}
+
+// Merge passwords back into user records received from Firebase
+// (passwords are stripped before pushing to Firebase but kept in localStorage)
+function _mergeUserPasswords(remoteJson, localRaw) {
+  try {
+    const remote = JSON.parse(remoteJson);
+    const local  = localRaw ? JSON.parse(localRaw) : DEFAULT_USERS;
+    const merged = remote.map(function(r) {
+      var l = local.find(function(x) { return x.id === r.id; });
+      return (l && l.password) ? Object.assign({}, r, { password: l.password }) : r;
+    });
+    return JSON.stringify(merged);
+  } catch(e) { return remoteJson; }
+}
 
 function initFirebaseSync() {
   try {
@@ -3256,13 +3321,15 @@ function initFirebaseSync() {
       _fbDb.ref('pmo/' + key).on('value', snap => {
         if (_isSyncing) return;
         const val = snap.val();
-        // val is { d: "<json string>" } — extract the string
         const remote = (val && typeof val.d === 'string') ? val.d : null;
         if (!remote) return;
-        // Validate it's real JSON before accepting
         try { JSON.parse(remote); } catch(e) { return; }
-        if (localStorage.getItem(key) !== remote) {
-          localStorage.setItem(key, remote);
+        // For users: merge passwords back (stripped before push, kept local only)
+        const stored = (key === STORAGE_KEYS.users)
+          ? _mergeUserPasswords(remote, localStorage.getItem(key))
+          : remote;
+        if (localStorage.getItem(key) !== stored) {
+          localStorage.setItem(key, stored);
           try { if (typeof renderCurrentView === 'function') renderCurrentView(); } catch(e){}
         }
       });
@@ -3277,12 +3344,14 @@ function initFirebaseSync() {
         const remote = (val && typeof val.d === 'string') ? val.d : null;
         if (remote) {
           try { JSON.parse(remote); } catch(e) { return; }
-          if (localStorage.getItem(key) !== remote) {
-            localStorage.setItem(key, remote);
+          const stored = (key === STORAGE_KEYS.users)
+            ? _mergeUserPasswords(remote, localStorage.getItem(key))
+            : remote;
+          if (localStorage.getItem(key) !== stored) {
+            localStorage.setItem(key, stored);
             try { if (typeof renderCurrentView === 'function') renderCurrentView(); } catch(e){}
           }
         } else {
-          // Firebase empty → seed from local (first admin run only)
           const local = localStorage.getItem(key);
           if (local) pushToFirebase(key, JSON.parse(local));
         }
@@ -3308,14 +3377,16 @@ function updateSyncStatus(msg) {
 }
 
 function pushToFirebase(key, data) {
-  // Store as { d: "<json string>" } — wrapping in an object with a string field
-  // prevents Firebase from ever touching the internal structure of the data.
-  // Arrays stay arrays, empty strings stay empty strings, all fields preserved.
+  // Store as { d: "<json string>" } — prevents Firebase array→object corruption.
+  // Passwords are stripped from user records before pushing — they stay local only.
   if (!_syncEnabled || !_fbDb) return;
   _isSyncing = true;
   try {
-    const payload = { d: JSON.stringify(data) };
-    _fbDb.ref('pmo/' + key).set(payload, () => { _isSyncing = false; });
+    var payload = data;
+    if (key === STORAGE_KEYS.users && Array.isArray(data)) {
+      payload = data.map(function(u) { var r = Object.assign({}, u); delete r.password; return r; });
+    }
+    _fbDb.ref('pmo/' + key).set({ d: JSON.stringify(payload) }, () => { _isSyncing = false; });
   } catch(e) { _isSyncing = false; }
 }
 
@@ -3709,12 +3780,14 @@ function doLogin() {
   if (user.forceChange) { showForceChangeModal(); }
   else { initApp(); }
   setTimeout(initFirebaseSync, 500);
+  _fbSignInSilently(u, p); // background — non-blocking
 }
 
 function doLogout() {
   onWebLogout('logout');
   currentUser = null;
   localStorage.removeItem(STORAGE_KEYS.session);
+  if (_fbAuth) _fbAuth.signOut().catch(() => {});
   location.reload();
 }
 
@@ -3735,12 +3808,17 @@ function showForceChangeModal() {
   document.getElementById('taskModal').classList.add('open');
 }
 
-function saveForceChange() {
+async function saveForceChange() {
   const np = document.getElementById('fpNewPw').value;
   const cp = document.getElementById('fpConfPw').value;
   const err = document.getElementById('fpErr');
   if (np.length < 6) { err.textContent = 'Min 6 characters.'; err.style.display='block'; return; }
   if (np !== cp) { err.textContent = 'Passwords do not match.'; err.style.display='block'; return; }
+  // Update Firebase Auth password if available (non-blocking on failure)
+  if (_fbAuth && _fbAuth.currentUser) {
+    try { await _fbAuth.currentUser.updatePassword(np); } catch(e) { /* silent — local update still proceeds */ }
+  }
+  // Original logic — unchanged
   const users = getUsers();
   const idx = users.findIndex(x => x.id === currentUser.id);
   users[idx].password = np;
@@ -5513,6 +5591,10 @@ function addUser() {
   const newUser = { id:'u'+Date.now(), username, password:pw, name, role, email, userType:'user', division, projects:[], forceChange:true };
   users.push(newUser);
   saveUsers(users);
+  // Silently create Firebase Auth account (non-blocking)
+  if (_fbAuth) _fbAuth.createUserWithEmailAndPassword(usernameToEmail(username), pw).catch(e => {
+    if (e.code !== 'auth/email-already-in-use') console.warn('FB Auth create:', username, e.code);
+  });
   toast(`User ${name} created.`, 'success');
   renderAdmin();
 }
@@ -5599,7 +5681,7 @@ function renderProfile() {
   `;
 }
 
-function changePassword() {
+async function changePassword() {
   const old = document.getElementById('cpOld').value;
   const np = document.getElementById('cpNew').value;
   const cp = document.getElementById('cpConf').value;
@@ -5608,6 +5690,15 @@ function changePassword() {
   if (np.length < 6) { err.textContent='Min 6 characters.'; err.style.display='block'; return; }
   if (np !== cp) { err.textContent='Passwords do not match.'; err.style.display='block'; return; }
   err.style.display='none';
+  // Update Firebase Auth password if available (non-blocking on failure)
+  if (_fbAuth && _fbAuth.currentUser) {
+    try {
+      const cred = firebase.auth.EmailAuthProvider.credential(usernameToEmail(currentUser.username), old);
+      await _fbAuth.currentUser.reauthenticateWithCredential(cred);
+      await _fbAuth.currentUser.updatePassword(np);
+    } catch(e) { /* silent — local update still proceeds */ }
+  }
+  // Original logic — unchanged
   const users = getUsers();
   const idx = users.findIndex(u=>u.id===currentUser.id);
   users[idx].password = np;
@@ -5667,6 +5758,17 @@ document.getElementById('loginPass').addEventListener('keydown', e => { if (e.ke
     }
   }
 })();
+
+// Kick off Firebase Auth once CDN globals are ready (polls until available)
+(function kickoffFirebase(tries) {
+  if (typeof firebase !== 'undefined' && typeof firebase.auth === 'function') {
+    initFirebase();
+  } else if (tries > 0) {
+    setTimeout(function() { kickoffFirebase(tries - 1); }, 100);
+  } else {
+    console.warn('RCC-PMO: Firebase SDK unavailable — running in Local Only mode.');
+  }
+}(50));
 
 // ═══════════════════════════════════════════════
 // BULK IMPORT
@@ -6596,6 +6698,10 @@ function saveEmployee(uid) {
     const newId = 'u' + Date.now();
     users.push({ id:newId, username, password:pw, name, role, email, title, grade, reportsTo:reports, userType:'user', projects:[], forceChange:true });
     saveUsers(users);
+    // Silently create Firebase Auth account (non-blocking)
+    if (_fbAuth) _fbAuth.createUserWithEmailAndPassword(usernameToEmail(username), pw).catch(e => {
+      if (e.code !== 'auth/email-already-in-use') console.warn('FB Auth create:', username, e.code);
+    });
     toast(`${name} added.`, 'success');
   }
   renderEmployeesTab();
