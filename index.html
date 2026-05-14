@@ -5004,6 +5004,22 @@ function renderTaskModal(t) {
             <textarea id="eFDesc" style="width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:var(--radius);padding:8px 12px;font-family:var(--font);font-size:13px;outline:none;resize:vertical;min-height:90px;" onfocus="this.style.borderColor='#C0392B'" onblur="this.style.borderColor='var(--border)'">${escHtml(t.description||'')}</textarea>
           </div>
 
+          <div class="form-group" style="margin-bottom:16px;">
+            <label>Progress % <span style="font-size:10px;color:var(--text3);">(0–100)</span></label>
+            <div style="display:flex;gap:10px;align-items:center;">
+              <input type="number" id="eFProgress" min="0" max="100" step="5"
+                value="${t.progress !== undefined ? t.progress : 0}"
+                ${canEdit ? '' : 'disabled'}
+                style="width:72px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:var(--radius);padding:7px 10px;font-family:var(--font);font-size:13px;outline:none;${canEdit?'':'opacity:0.65;cursor:default;'}"
+                ${canEdit ? "onfocus=\"this.style.borderColor='#C0392B'\" onblur=\"this.style.borderColor='var(--border)'\"" : ''}
+                oninput="var v=Math.min(100,Math.max(0,parseInt(this.value)||0));var b=document.getElementById('eFProgressBar');var l=document.getElementById('eFProgressLbl');if(b)b.style.width=v+'%';if(l)l.textContent=v+'%';">
+              <div style="flex:1;height:7px;background:var(--bg4);border-radius:4px;overflow:hidden;">
+                <div id="eFProgressBar" style="height:100%;background:linear-gradient(90deg,#27ae60,#34c97b);border-radius:4px;width:${t.progress||0}%;transition:width .25s;"></div>
+              </div>
+              <span id="eFProgressLbl" style="font-size:13px;color:var(--green);font-weight:700;min-width:36px;text-align:right;">${t.progress||0}%</span>
+            </div>
+          </div>
+
           <div style="display:flex;gap:8px;">
             ${canEdit ? `<button class="btn btn-primary" style="flex:1;" onclick="saveTaskEdit('${t.id}')">💾 Save Changes</button>` : `<div style="font-size:12px;color:var(--text3);padding:8px;text-align:center;flex:1;">🔒 Read-only — you cannot edit this task</div>`}
             ${canEdit && (isSuperAdmin()||t.assignedTo===currentUser.id||t.assignedBy===currentUser.id)?
