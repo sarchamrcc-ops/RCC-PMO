@@ -3277,16 +3277,32 @@ function initFirebase() {
 }
 
 // Silent Firebase Auth sign-in — called after successful legacy login.
-// Non-blocking: app is already shown; this just builds up the Auth account
-// in the background so DB rules can eventually be locked down.
+// Signs the user into Firebase Auth (creating the account on first login if it
+// doesn't exist yet) so the database rules (auth != null) allow read/write.
+// Returns true on success, false on failure. Callers should await this BEFORE
+// starting Firebase sync, otherwise reads/writes race ahead of auth and the
+// rules reject them with permission_denied.
 async function _fbSignInSilently(u, p) {
-  if (!_fbAuth) return;
+  if (!_fbAuth) return false;
   try {
     await _fbAuth.signInWithEmailAndPassword(usernameToEmail(u), p);
+    return true;
   } catch(err) {
+    // No account yet (or credential mismatch): create it, then it's signed in.
     if (err.code === 'auth/user-not-found' || err.code === 'auth/invalid-credential') {
-      try { await _fbAuth.createUserWithEmailAndPassword(usernameToEmail(u), p); } catch(e) { /* silent */ }
+      try {
+        await _fbAuth.createUserWithEmailAndPassword(usernameToEmail(u), p);
+        return true;
+      } catch(e) {
+        // If the account already exists but the password differs (e.g. user
+        // changed it before this fix), sign-in above would have thrown
+        // wrong-password; nothing we can do silently here.
+        console.warn('Firebase Auth sign-in/create failed for', u, '-', e.code);
+        return false;
+      }
     }
+    console.warn('Firebase Auth sign-in failed for', u, '-', err.code);
+    return false;
   }
 }
 
@@ -3769,7 +3785,7 @@ function toggleLoginPw() {
   inp.focus();
 }
 
-function doLogin() {
+async function doLogin() {
   const u = document.getElementById('loginUser').value.trim();
   const p = document.getElementById('loginPass').value;
   const users = getUsers();
@@ -3783,8 +3799,17 @@ function doLogin() {
   document.getElementById('app').classList.add('visible');
   if (user.forceChange) { showForceChangeModal(); }
   else { initApp(); }
-  setTimeout(initFirebaseSync, 500);
-  _fbSignInSilently(u, p); // background — non-blocking
+  // Sign into Firebase Auth FIRST and wait for it, THEN start sync. Starting
+  // sync before auth completes causes every read/write to be rejected with
+  // permission_denied (rules require auth != null).
+  _fbSignInSilently(u, p).then(function(ok) {
+    if (ok) {
+      initFirebaseSync();
+    } else {
+      updateSyncStatus('🔴 Local Only');
+      console.warn('Firebase Auth did not succeed — running local-only, no sync.');
+    }
+  });
 }
 
 function doLogout() {
@@ -5774,10 +5799,33 @@ document.getElementById('loginPass').addEventListener('keydown', e => { if (e.ke
       document.getElementById('loginScreen').style.display = 'none';
       document.getElementById('app').classList.add('visible');
       initApp();
-      setTimeout(initFirebaseSync, 500); // restore sync on page refresh
+      // Do NOT start sync on a fixed timer here. Firebase Auth persists its
+      // session across refreshes, but it restores asynchronously. Starting sync
+      // before that restore completes causes permission_denied. initFirebase()'s
+      // onAuthStateChanged handler starts sync once auth is confirmed present;
+      // if auth is genuinely absent we stay local-only rather than spamming
+      // permission errors. _startSyncWhenAuthReady handles the wait.
+      _startSyncWhenAuthReady();
     }
   }
 })();
+
+// Wait (briefly) for Firebase Auth to restore its persisted session, then start
+// sync. If no auth session appears, remain local-only. This avoids the
+// read/write-before-auth race that yields permission_denied.
+function _startSyncWhenAuthReady(triesLeft) {
+  if (triesLeft === undefined) triesLeft = 40; // ~8s max (40 * 200ms)
+  if (_fbAuth && _fbAuth.currentUser) {
+    initFirebaseSync();
+    return;
+  }
+  if (triesLeft <= 0) {
+    updateSyncStatus('🔴 Local Only');
+    console.warn('Firebase Auth session not restored after refresh — local-only. Log out and back in to re-establish sync.');
+    return;
+  }
+  setTimeout(function() { _startSyncWhenAuthReady(triesLeft - 1); }, 200);
+}
 
 // Kick off Firebase Auth once CDN globals are ready (polls until available)
 (function kickoffFirebase(tries) {
