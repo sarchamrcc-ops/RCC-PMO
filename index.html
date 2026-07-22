@@ -3284,25 +3284,32 @@ function initFirebase() {
 // rules reject them with permission_denied.
 async function _fbSignInSilently(u, p) {
   if (!_fbAuth) return false;
+  const email = usernameToEmail(u);
+  // Attempt 1: normal sign-in with the local password.
   try {
-    await _fbAuth.signInWithEmailAndPassword(usernameToEmail(u), p);
+    await _fbAuth.signInWithEmailAndPassword(email, p);
     return true;
   } catch(err) {
-    // No account yet (or credential mismatch): create it, then it's signed in.
-    if (err.code === 'auth/user-not-found' || err.code === 'auth/invalid-credential') {
-      try {
-        await _fbAuth.createUserWithEmailAndPassword(usernameToEmail(u), p);
-        return true;
-      } catch(e) {
-        // If the account already exists but the password differs (e.g. user
-        // changed it before this fix), sign-in above would have thrown
-        // wrong-password; nothing we can do silently here.
-        console.warn('Firebase Auth sign-in/create failed for', u, '-', e.code);
-        return false;
+    // Modern Firebase returns the deliberately-vague 'auth/invalid-login-credentials'
+    // (older SDKs: 'auth/user-not-found' / 'auth/invalid-credential' / 'auth/wrong-password').
+    // We can't tell "no account" from "account exists, wrong password" by the code alone,
+    // so on ANY sign-in failure we try to CREATE the account with the local password.
+    try {
+      await _fbAuth.createUserWithEmailAndPassword(email, p);
+      return true; // account didn't exist — now created and signed in
+    } catch(e2) {
+      if (e2.code === 'auth/email-already-in-use') {
+        // Account already exists but its Firebase password differs from the local
+        // one (likely changed before this fix, or seeded differently). The user
+        // must reconcile: log in with the password that Firebase actually has,
+        // or an admin resets it. We surface this clearly instead of failing mute.
+        console.warn('Firebase Auth: account exists for', u,
+          'but its password differs from the local password. This user needs a Firebase password reset. ('+e2.code+')');
+      } else {
+        console.warn('Firebase Auth sign-in/create failed for', u, '-', e2.code, e2.message);
       }
+      return false;
     }
-    console.warn('Firebase Auth sign-in failed for', u, '-', err.code);
-    return false;
   }
 }
 
