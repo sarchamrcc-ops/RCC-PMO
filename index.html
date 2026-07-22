@@ -3290,15 +3290,20 @@ async function _fbSignInSilently(u, p) {
   }
 }
 
-// Merge passwords back into user records received from Firebase
-// (passwords are stripped before pushing to Firebase but kept in localStorage)
+// Reconcile passwords between the Firebase copy and the local copy.
+// Passwords now sync to Firebase, but during the transition some records may
+// still be missing a password on one side or the other. Rule: never blank out
+// a password. Prefer the local password if present (covers a password just
+// set/changed on THIS device that may not have pushed yet); otherwise use the
+// remote password; otherwise leave whatever the remote record has.
 function _mergeUserPasswords(remoteJson, localRaw) {
   try {
     const remote = JSON.parse(remoteJson);
     const local  = localRaw ? JSON.parse(localRaw) : DEFAULT_USERS;
     const merged = remote.map(function(r) {
       var l = local.find(function(x) { return x.id === r.id; });
-      return (l && l.password) ? Object.assign({}, r, { password: l.password }) : r;
+      var pw = (l && l.password) ? l.password : r.password;
+      return pw ? Object.assign({}, r, { password: pw }) : r;
     });
     return JSON.stringify(merged);
   } catch(e) { return remoteJson; }
@@ -3382,11 +3387,10 @@ function pushToFirebase(key, data) {
   if (!_syncEnabled || !_fbDb) return;
   _isSyncing = true;
   try {
-    var payload = data;
-    if (key === STORAGE_KEYS.users && Array.isArray(data)) {
-      payload = data.map(function(u) { var r = Object.assign({}, u); delete r.password; return r; });
-    }
-    _fbDb.ref('pmo/' + key).set({ d: JSON.stringify(payload) }, () => { _isSyncing = false; });
+    // Passwords now sync like every other field so a password set/changed on
+    // one device works on all devices. (Previously stripped here, which meant
+    // new users and changed passwords never reached Firebase.)
+    _fbDb.ref('pmo/' + key).set({ d: JSON.stringify(data) }, () => { _isSyncing = false; });
   } catch(e) { _isSyncing = false; }
 }
 
@@ -6704,6 +6708,7 @@ function saveEmployee(uid) {
     users[idx].role      = role;
     users[idx].grade     = grade;
     users[idx].reportsTo = reports;
+    users[idx].division  = division;
     if (pw) users[idx].password = pw;
     saveUsers(users);
     toast(`${name} updated.`, 'success');
@@ -6712,7 +6717,7 @@ function saveEmployee(uid) {
     if (!pw) { errEl.textContent='Initial password is required.'; errEl.style.display='block'; return; }
     if (users.find(u => u.username === username)) { errEl.textContent='Username already taken.'; errEl.style.display='block'; return; }
     const newId = 'u' + Date.now();
-    users.push({ id:newId, username, password:pw, name, role, email, title, grade, reportsTo:reports, userType:'user', projects:[], forceChange:true });
+    users.push({ id:newId, username, password:pw, name, role, email, title, grade, reportsTo:reports, division, userType:'user', projects:[], forceChange:true });
     saveUsers(users);
     // Silently create Firebase Auth account (non-blocking)
     if (_fbAuth) _fbAuth.createUserWithEmailAndPassword(usernameToEmail(username), pw).catch(e => {
