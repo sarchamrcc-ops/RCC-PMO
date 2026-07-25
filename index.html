@@ -3315,6 +3315,20 @@ function _mergeUserPasswords(remoteJson, localRaw) {
       var l = local.find(function(x) { return x.id === r.id; });
       return (l && l.password) ? Object.assign({}, r, { password: l.password }) : r;
     });
+    // Union: re-add any seeded DEFAULT_USERS missing from the remote list (e.g.
+    // staff added later whose records never fully synced up). Without this the
+    // "Firebase wins" bootstrap silently drops them and they can't log in on a
+    // clean device. Remote data still wins for users that DO exist remotely.
+    var haveUser = {};
+    merged.forEach(function(u){ haveUser[(u.username||'').toLowerCase()] = true; });
+    DEFAULT_USERS.forEach(function(d){
+      var uname = (d.username||'').toLowerCase();
+      if (!haveUser[uname]) {
+        var l = local.find(function(x){ return (x.username||'').toLowerCase() === uname; });
+        merged.push(l || d);
+        haveUser[uname] = true;
+      }
+    });
     return JSON.stringify(merged);
   } catch(e) { return remoteJson; }
 }
@@ -3519,6 +3533,9 @@ const DEFAULT_USERS = [
   { id:'u34', username:'emorales',    password:'RCC@2026',      name:'Eric P. Morales',                  role:'tech',        userType:'user',   email:'emorales@rcc.com.sa',       reportsTo:'u23', grade:7, title:'BMS & System Operator',                     division:'fm', projects:[], forceChange:true },
   { id:'u35', username:'nhamester',   password:'RCC@2026',      name:'Noman Hamester',                   role:'sup',         userType:'user',   email:'nhamester@rcc.com.sa',      reportsTo:'u23', grade:7, title:'Cleaning Supervisor',                       division:'fm', projects:[], forceChange:true },
   { id:'u36', username:'achacko',     password:'RCC@2026',      name:'Aby Chacko',                       role:'admin_coord', userType:'user',   email:'achacko@rcc.com.sa',        reportsTo:'u23', grade:7, title:'Secretary & Document Controller',           division:'fm', projects:[], forceChange:true },
+  // ── Re-seeded active staff (added via admin UI; baked in so they exist on every device) ──
+  { id:'u37', username:'ederaan',     password:'Pass1234',      name:'Eyad AlDeraan',                    role:'site',        userType:'user',   email:'e.alderaan@alrugaibgroup.com', reportsTo:'u6',  grade:5, title:'Electrical Engineer',                       division:'pmo', projects:[], forceChange:false },
+  { id:'u38', username:'aghamdi',     password:'Pass1234',      name:'Asem Al-Ghamdi',                   role:'site',        userType:'user',   email:'a.alghamdi@alrugaibgroup.com', reportsTo:'u3',  grade:5, title:'Urban Architect',                           division:'pmo', projects:[], forceChange:false },
 ];
 
 const DEFAULT_PROJECTS = [
