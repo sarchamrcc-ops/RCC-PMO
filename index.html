@@ -3268,7 +3268,7 @@ function initFirebase() {
           document.getElementById('loginScreen').style.display = 'none';
           document.getElementById('app').classList.add('visible');
           if (user.forceChange) showForceChangeModal(); else initApp();
-          setTimeout(initFirebaseSync, 500);
+          _startSyncWhenAuthReady();
         }
       }
       // If currentUser already set (by legacy restore/login), do nothing
@@ -3277,56 +3277,43 @@ function initFirebase() {
 }
 
 // Silent Firebase Auth sign-in — called after successful legacy login.
-// Signs the user into Firebase Auth (creating the account on first login if it
-// doesn't exist yet) so the database rules (auth != null) allow read/write.
-// Returns true on success, false on failure. Callers should await this BEFORE
-// starting Firebase sync, otherwise reads/writes race ahead of auth and the
-// rules reject them with permission_denied.
+// Non-blocking: app is already shown; this just builds up the Auth account
+// in the background so DB rules can eventually be locked down.
 async function _fbSignInSilently(u, p) {
-  if (!_fbAuth) return false;
-  const email = usernameToEmail(u);
-  // Attempt 1: normal sign-in with the local password.
+  if (!_fbAuth) return null;
   try {
-    await _fbAuth.signInWithEmailAndPassword(email, p);
-    return true;
+    return await _fbAuth.signInWithEmailAndPassword(usernameToEmail(u), p);
   } catch(err) {
-    // Modern Firebase returns the deliberately-vague 'auth/invalid-login-credentials'
-    // (older SDKs: 'auth/user-not-found' / 'auth/invalid-credential' / 'auth/wrong-password').
-    // We can't tell "no account" from "account exists, wrong password" by the code alone,
-    // so on ANY sign-in failure we try to CREATE the account with the local password.
-    try {
-      await _fbAuth.createUserWithEmailAndPassword(email, p);
-      return true; // account didn't exist — now created and signed in
-    } catch(e2) {
-      if (e2.code === 'auth/email-already-in-use') {
-        // Account already exists but its Firebase password differs from the local
-        // one (likely changed before this fix, or seeded differently). The user
-        // must reconcile: log in with the password that Firebase actually has,
-        // or an admin resets it. We surface this clearly instead of failing mute.
-        console.warn('Firebase Auth: account exists for', u,
-          'but its password differs from the local password. This user needs a Firebase password reset. ('+e2.code+')');
-      } else {
-        console.warn('Firebase Auth sign-in/create failed for', u, '-', e2.code, e2.message);
-      }
-      return false;
+    if (err.code === 'auth/user-not-found' || err.code === 'auth/invalid-credential') {
+      try { return await _fbAuth.createUserWithEmailAndPassword(usernameToEmail(u), p); }
+      catch(e) { console.warn('Auth create failed:', e.code); return null; }
     }
+    console.warn('Auth sign-in failed:', err.code);
+    return null;
   }
 }
 
-// Reconcile passwords between the Firebase copy and the local copy.
-// Passwords now sync to Firebase, but during the transition some records may
-// still be missing a password on one side or the other. Rule: never blank out
-// a password. Prefer the local password if present (covers a password just
-// set/changed on THIS device that may not have pushed yet); otherwise use the
-// remote password; otherwise leave whatever the remote record has.
+// Start the DB sync only once Firebase Auth has a session. Secured rules require
+// auth != null, so firing reads before sign-in resolves => permission-denied
+// (why a clean/incognito session failed while a primed browser, holding a
+// persisted Auth token, appeared to work). Used by restore paths + fallback.
+function _startSyncWhenAuthReady(triesLeft) {
+  if (typeof triesLeft !== 'number') triesLeft = 40; // ~10s @ 250ms
+  if (_syncEnabled) return;
+  if (_fbAuth && _fbAuth.currentUser) { initFirebaseSync(); return; }
+  if (triesLeft <= 0) return; // give up quietly; onAuthStateChanged may still catch it
+  setTimeout(function(){ _startSyncWhenAuthReady(triesLeft - 1); }, 250);
+}
+
+// Merge passwords back into user records received from Firebase
+// (passwords are stripped before pushing to Firebase but kept in localStorage)
 function _mergeUserPasswords(remoteJson, localRaw) {
   try {
     const remote = JSON.parse(remoteJson);
     const local  = localRaw ? JSON.parse(localRaw) : DEFAULT_USERS;
     const merged = remote.map(function(r) {
       var l = local.find(function(x) { return x.id === r.id; });
-      var pw = (l && l.password) ? l.password : r.password;
-      return pw ? Object.assign({}, r, { password: pw }) : r;
+      return (l && l.password) ? Object.assign({}, r, { password: l.password }) : r;
     });
     return JSON.stringify(merged);
   } catch(e) { return remoteJson; }
@@ -3410,10 +3397,11 @@ function pushToFirebase(key, data) {
   if (!_syncEnabled || !_fbDb) return;
   _isSyncing = true;
   try {
-    // Passwords now sync like every other field so a password set/changed on
-    // one device works on all devices. (Previously stripped here, which meant
-    // new users and changed passwords never reached Firebase.)
-    _fbDb.ref('pmo/' + key).set({ d: JSON.stringify(data) }, () => { _isSyncing = false; });
+    var payload = data;
+    if (key === STORAGE_KEYS.users && Array.isArray(data)) {
+      payload = data.map(function(u) { var r = Object.assign({}, u); delete r.password; return r; });
+    }
+    _fbDb.ref('pmo/' + key).set({ d: JSON.stringify(payload) }, () => { _isSyncing = false; });
   } catch(e) { _isSyncing = false; }
 }
 
@@ -3792,7 +3780,7 @@ function toggleLoginPw() {
   inp.focus();
 }
 
-async function doLogin() {
+function doLogin() {
   const u = document.getElementById('loginUser').value.trim();
   const p = document.getElementById('loginPass').value;
   const users = getUsers();
@@ -3806,16 +3794,12 @@ async function doLogin() {
   document.getElementById('app').classList.add('visible');
   if (user.forceChange) { showForceChangeModal(); }
   else { initApp(); }
-  // Sign into Firebase Auth FIRST and wait for it, THEN start sync. Starting
-  // sync before auth completes causes every read/write to be rejected with
-  // permission_denied (rules require auth != null).
-  _fbSignInSilently(u, p).then(function(ok) {
-    if (ok) {
-      initFirebaseSync();
-    } else {
-      updateSyncStatus('🔴 Local Only');
-      console.warn('Firebase Auth did not succeed — running local-only, no sync.');
-    }
+  // Sign in to Firebase Auth FIRST, then sync — otherwise a clean session
+  // (incognito / new device / new employee) fires permission-denied reads
+  // before auth resolves.
+  _fbSignInSilently(u, p).then(function(cred){
+    if (cred && cred.user) initFirebaseSync();
+    else _startSyncWhenAuthReady();
   });
 }
 
@@ -5806,33 +5790,10 @@ document.getElementById('loginPass').addEventListener('keydown', e => { if (e.ke
       document.getElementById('loginScreen').style.display = 'none';
       document.getElementById('app').classList.add('visible');
       initApp();
-      // Do NOT start sync on a fixed timer here. Firebase Auth persists its
-      // session across refreshes, but it restores asynchronously. Starting sync
-      // before that restore completes causes permission_denied. initFirebase()'s
-      // onAuthStateChanged handler starts sync once auth is confirmed present;
-      // if auth is genuinely absent we stay local-only rather than spamming
-      // permission errors. _startSyncWhenAuthReady handles the wait.
-      _startSyncWhenAuthReady();
+      _startSyncWhenAuthReady(); // restore sync on page refresh (waits for Auth)
     }
   }
 })();
-
-// Wait (briefly) for Firebase Auth to restore its persisted session, then start
-// sync. If no auth session appears, remain local-only. This avoids the
-// read/write-before-auth race that yields permission_denied.
-function _startSyncWhenAuthReady(triesLeft) {
-  if (triesLeft === undefined) triesLeft = 40; // ~8s max (40 * 200ms)
-  if (_fbAuth && _fbAuth.currentUser) {
-    initFirebaseSync();
-    return;
-  }
-  if (triesLeft <= 0) {
-    updateSyncStatus('🔴 Local Only');
-    console.warn('Firebase Auth session not restored after refresh — local-only. Log out and back in to re-establish sync.');
-    return;
-  }
-  setTimeout(function() { _startSyncWhenAuthReady(triesLeft - 1); }, 200);
-}
 
 // Kick off Firebase Auth once CDN globals are ready (polls until available)
 (function kickoffFirebase(tries) {
@@ -6763,7 +6724,6 @@ function saveEmployee(uid) {
     users[idx].role      = role;
     users[idx].grade     = grade;
     users[idx].reportsTo = reports;
-    users[idx].division  = division;
     if (pw) users[idx].password = pw;
     saveUsers(users);
     toast(`${name} updated.`, 'success');
@@ -6772,7 +6732,7 @@ function saveEmployee(uid) {
     if (!pw) { errEl.textContent='Initial password is required.'; errEl.style.display='block'; return; }
     if (users.find(u => u.username === username)) { errEl.textContent='Username already taken.'; errEl.style.display='block'; return; }
     const newId = 'u' + Date.now();
-    users.push({ id:newId, username, password:pw, name, role, email, title, grade, reportsTo:reports, division, userType:'user', projects:[], forceChange:true });
+    users.push({ id:newId, username, password:pw, name, role, email, title, grade, reportsTo:reports, userType:'user', projects:[], forceChange:true });
     saveUsers(users);
     // Silently create Firebase Auth account (non-blocking)
     if (_fbAuth) _fbAuth.createUserWithEmailAndPassword(usernameToEmail(username), pw).catch(e => {
