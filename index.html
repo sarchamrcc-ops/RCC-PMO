@@ -3259,8 +3259,9 @@ function initFirebase() {
     _fbAuth.onAuthStateChanged(function(fbUser) {
       if (fbUser && !currentUser) {
         // Firebase Auth token present but no local session — restore from it
-        const uname = emailToUsername(fbUser.email);
-        const user = getUsers().find(u => u.username === uname) || DEFAULT_USERS.find(u => u.username === uname);
+        const un = (emailToUsername(fbUser.email) || '').trim().toLowerCase();
+        const byName = function(x){ return ((x.username||'')+'').trim().toLowerCase() === un; };
+        const user = getUsers().find(byName) || DEFAULT_USERS.find(byName);
         if (user) {
           currentUser = user;
           save(STORAGE_KEYS.session, user.id);
@@ -3279,16 +3280,47 @@ function initFirebase() {
 // Silent Firebase Auth sign-in — called after successful legacy login.
 // Non-blocking: app is already shown; this just builds up the Auth account
 // in the background so DB rules can eventually be locked down.
+// Passwords that a seeded/admin-created Auth account may still be holding if it
+// drifted out of step with the app's own copy (e.g. the account was created
+// from the Employees tab, then the password was changed while Auth wasn't
+// ready). All of these are already public in this file — no new exposure.
+const LEGACY_AUTH_PASSWORDS = ['RCC@2026','Pass1234','RCC@admin2024'];
+
 async function _fbSignInSilently(u, p) {
   if (!_fbAuth) return null;
+  const email = usernameToEmail(u);
+  const RETRY = ['auth/user-not-found','auth/invalid-credential','auth/invalid-login-credentials','auth/wrong-password'];
   try {
-    return await _fbAuth.signInWithEmailAndPassword(usernameToEmail(u), p);
+    return await _fbAuth.signInWithEmailAndPassword(email, p);
   } catch(err) {
-    if (err.code === 'auth/user-not-found' || err.code === 'auth/invalid-credential') {
-      try { return await _fbAuth.createUserWithEmailAndPassword(usernameToEmail(u), p); }
-      catch(e) { console.warn('Auth create failed:', e.code); return null; }
+    const code = err && err.code;
+    if (RETRY.indexOf(code) === -1) { console.warn('Auth sign-in failed:', code); return null; }
+
+    // (a) The account may simply not exist yet — first login creates it.
+    try { return await _fbAuth.createUserWithEmailAndPassword(email, p); }
+    catch(e) {
+      if (e.code !== 'auth/email-already-in-use') { console.warn('Auth create failed:', u, e.code); return null; }
     }
-    console.warn('Auth sign-in failed:', err.code);
+
+    // (b) The account exists but its password no longer matches the app's.
+    //     Sign in with a known seed password, then realign Auth to the app
+    //     password so this heals itself instead of leaving the user unsynced.
+    const target = ((u || '') + '').trim().toLowerCase();
+    const d = DEFAULT_USERS.find(function(x){ return uname(x) === target; });
+    const candidates = [];
+    if (d && d.password) candidates.push(d.password);
+    LEGACY_AUTH_PASSWORDS.forEach(function(c){ if (candidates.indexOf(c) === -1) candidates.push(c); });
+    for (const c of candidates) {
+      if (c === p) continue;
+      try {
+        const cred = await _fbAuth.signInWithEmailAndPassword(email, c);
+        try { await cred.user.updatePassword(p); console.info('RCC-PMO: realigned Auth password for', u); }
+        catch(e2) { console.warn('Auth realign failed:', e2 && e2.code); }
+        return cred;
+      } catch(e3) { /* try the next candidate */ }
+    }
+    console.warn('RCC-PMO: Auth password for "' + u + '" is out of sync. Delete ' + email +
+                 ' under Firebase Console > Authentication > Users, then have them log in again.');
     return null;
   }
 }
@@ -3310,26 +3342,25 @@ function _startSyncWhenAuthReady(triesLeft) {
 function _mergeUserPasswords(remoteJson, localRaw) {
   try {
     const remote = JSON.parse(remoteJson);
+    if (!Array.isArray(remote)) return remoteJson;
     const local  = localRaw ? JSON.parse(localRaw) : DEFAULT_USERS;
+    const lById = {}, lByName = {};
+    (Array.isArray(local) ? local : []).forEach(function(l){ lById[l.id] = l; lByName[uname(l)] = l; });
+
+    // Password precedence: remote (now authoritative, since pushToFirebase no
+    // longer strips it) > local cache > DEFAULT_USERS seed. Previously local
+    // always won, which reverted password changes made on another device.
     const merged = remote.map(function(r) {
-      var l = local.find(function(x) { return x.id === r.id; });
-      return (l && l.password) ? Object.assign({}, r, { password: l.password }) : r;
-    });
-    // Union: re-add any seeded DEFAULT_USERS missing from the remote list (e.g.
-    // staff added later whose records never fully synced up). Without this the
-    // "Firebase wins" bootstrap silently drops them and they can't log in on a
-    // clean device. Remote data still wins for users that DO exist remotely.
-    var haveUser = {};
-    merged.forEach(function(u){ haveUser[(u.username||'').toLowerCase()] = true; });
-    DEFAULT_USERS.forEach(function(d){
-      var uname = (d.username||'').toLowerCase();
-      if (!haveUser[uname]) {
-        var l = local.find(function(x){ return (x.username||'').toLowerCase() === uname; });
-        merged.push(l || d);
-        haveUser[uname] = true;
+      var out = Object.assign({}, r);
+      if (!out.password) {
+        var l = lById[r.id] || lByName[uname(r)];
+        if (l && l.password) out.password = l.password;
       }
+      return out;
     });
-    return JSON.stringify(merged);
+    // _reconcileUsers unions in any seeded account the remote list is missing
+    // and repairs still-empty passwords from DEFAULT_USERS.
+    return JSON.stringify(_reconcileUsers(merged).users);
   } catch(e) { return remoteJson; }
 }
 
@@ -3407,16 +3438,23 @@ function updateSyncStatus(msg) {
 
 function pushToFirebase(key, data) {
   // Store as { d: "<json string>" } — prevents Firebase array→object corruption.
-  // Passwords are stripped from user records before pushing — they stay local only.
+  // Passwords are NO LONGER stripped. Stripping them was the root cause of new
+  // staff being locked out: the remote list became the source of truth on
+  // bootstrap, so password-less remote records overwrote good local ones and
+  // nothing could authenticate. (Note: the seed passwords are already visible
+  // in this file to anyone who loads the page — moving user records to real
+  // Firebase Auth-only credentials is the proper long-term fix.)
   if (!_syncEnabled || !_fbDb) return;
   _isSyncing = true;
+  // Safety net: if the write callback never fires (offline//rules), don't leave
+  // _isSyncing pinned true — that would deafen the remote listener for good.
+  clearTimeout(pushToFirebase._t);
+  pushToFirebase._t = setTimeout(function(){ _isSyncing = false; }, 8000);
   try {
-    var payload = data;
-    if (key === STORAGE_KEYS.users && Array.isArray(data)) {
-      payload = data.map(function(u) { var r = Object.assign({}, u); delete r.password; return r; });
-    }
-    _fbDb.ref('pmo/' + key).set({ d: JSON.stringify(payload) }, () => { _isSyncing = false; });
-  } catch(e) { _isSyncing = false; }
+    _fbDb.ref('pmo/' + key).set({ d: JSON.stringify(data) }, () => {
+      clearTimeout(pushToFirebase._t); _isSyncing = false;
+    });
+  } catch(e) { clearTimeout(pushToFirebase._t); _isSyncing = false; }
 }
 
 function save(key, data) {
@@ -3534,8 +3572,8 @@ const DEFAULT_USERS = [
   { id:'u35', username:'nhamester',   password:'RCC@2026',      name:'Noman Hamester',                   role:'sup',         userType:'user',   email:'nhamester@rcc.com.sa',      reportsTo:'u23', grade:7, title:'Cleaning Supervisor',                       division:'fm', projects:[], forceChange:true },
   { id:'u36', username:'achacko',     password:'RCC@2026',      name:'Aby Chacko',                       role:'admin_coord', userType:'user',   email:'achacko@rcc.com.sa',        reportsTo:'u23', grade:7, title:'Secretary & Document Controller',           division:'fm', projects:[], forceChange:true },
   // ── Re-seeded active staff (added via admin UI; baked in so they exist on every device) ──
-  { id:'u37', username:'ederaan',     password:'Pass1234',      name:'Eyad AlDeraan',                    role:'site',        userType:'user',   email:'e.alderaan@alrugaibgroup.com', reportsTo:'u6',  grade:5, title:'Electrical Engineer',                       division:'pmo', projects:[], forceChange:false },
-  { id:'u38', username:'aghamdi',     password:'Pass1234',      name:'Asem Al-Ghamdi',                   role:'site',        userType:'user',   email:'a.alghamdi@alrugaibgroup.com', reportsTo:'u3',  grade:5, title:'Urban Architect',                           division:'pmo', projects:[], forceChange:false },
+  { id:'u37', username:'ederaan',     password:'RCC@2026',      name:'Eyad AlDeraan',                    role:'site',        userType:'user',   email:'e.alderaan@alrugaibgroup.com', reportsTo:'u6',  grade:5, title:'Electrical Engineer',                       division:'pmo', projects:[], forceChange:true },
+  { id:'u38', username:'aghamdi',     password:'RCC@2026',      name:'Asem Al-Ghamdi',                   role:'site',        userType:'user',   email:'a.alghamdi@alrugaibgroup.com', reportsTo:'u3',  grade:5, title:'Urban Architect',                           division:'pmo', projects:[], forceChange:true },
 ];
 
 const DEFAULT_PROJECTS = [
@@ -3601,24 +3639,79 @@ const CRITICALITIES = ['Critical','High','Normal','Low'];
 const ROLES = { coo:'COO', pmo:'PMO Manager', tl:'Sr. Architect / PM Team Leader', pm:'Project Manager', eng:'Senior Engineer', site:'Site Engineer', sup:'Supervisor', draft:'Draftsman / Technician', cdo:'CDO', om:'Operations Manager', fm:'FM Division Manager', tech:'Technician / Operator', admin_coord:'Administrator / Coordinator' };
 const ROLE_CLASS = { coo:'role-coo', pmo:'role-pmo', tl:'role-tl', pm:'role-pm', eng:'role-eng', site:'role-tl', sup:'role-sup', draft:'role-draft', cdo:'role-coo', om:'role-pmo', fm:'role-pmo', tech:'role-draft', admin_coord:'role-draft' };
 
+// ═══════════════════════════════════════════════════════════════════════════
+// SEEDED-ACCOUNT RECONCILIATION  (fixes "new staff can't log in", for good)
+// ═══════════════════════════════════════════════════════════════════════════
+// Three separate faults used to combine to lock newly-added staff out:
+//   1. getUsers() only re-seeded when 'amadani' was missing, so any browser
+//      that had loaded an older build kept a stale pmo_users_v5 forever and
+//      never learned about staff baked in later.
+//   2. pushToFirebase() stripped `password` before writing, so the remote
+//      user list held records with NO password. On bootstrap "Firebase wins",
+//      and those password-less records overwrote the good local ones — after
+//      which no password could ever match.
+//   3. _mergeUserPasswords() only restored a password when the LOCAL copy
+//      already had one, so a device that never had the user got the empty
+//      remote record and stayed broken.
+// _reconcileUsers() is the single guard against all three: it runs on every
+// read and on every remote snapshot, guarantees every DEFAULT_USERS account
+// exists with a usable password, and back-fills blank fields without
+// clobbering deliberate admin edits.
+const USER_SEED_VERSION  = 3;
+const SEED_VERSION_KEY   = 'pmo_users_seed_version';
+// Usernames listed here get their credentials re-applied from DEFAULT_USERS the
+// first time a device sees the current USER_SEED_VERSION. To roll a seeded
+// password out to every device again: add the username and bump the version.
+const SEED_CREDENTIAL_RESET = ['ederaan','aghamdi'];
+const SEED_FIELDS = ['name','role','userType','email','reportsTo','grade','title','division'];
+
+function uname(u) { return (((u && u.username) || '') + '').trim().toLowerCase(); }
+
+function _reconcileUsers(list) {
+  var out = Array.isArray(list) ? list.map(function(u){ return Object.assign({}, u); }) : [];
+  var changed = false;
+
+  var seedVer = 0;
+  try { seedVer = parseInt(localStorage.getItem(SEED_VERSION_KEY), 10) || 0; } catch(e) {}
+  var resetCreds = seedVer < USER_SEED_VERSION;
+
+  var byId = {}, byName = {};
+  out.forEach(function(u){ byId[u.id] = u; byName[uname(u)] = u; });
+
+  DEFAULT_USERS.forEach(function(d){
+    var u = byId[d.id] || byName[uname(d)];
+    if (!u) { out.push(Object.assign({}, d)); changed = true; return; }
+
+    SEED_FIELDS.forEach(function(k){
+      if ((u[k] === undefined || u[k] === null || u[k] === '') && d[k] !== undefined && d[k] !== null) {
+        u[k] = d[k]; changed = true;
+      }
+    });
+    if (!Array.isArray(u.projects)) { u.projects = []; changed = true; }
+    // A record with no password can never authenticate — always repair it.
+    if (!u.password) { u.password = d.password; changed = true; }
+    if (resetCreds && SEED_CREDENTIAL_RESET.indexOf(uname(d)) !== -1) {
+      if (u.password !== d.password || u.forceChange !== d.forceChange) {
+        u.password = d.password; u.forceChange = d.forceChange; changed = true;
+      }
+    }
+  });
+
+  if (resetCreds) { try { localStorage.setItem(SEED_VERSION_KEY, String(USER_SEED_VERSION)); } catch(e) {} }
+  return { users: out, changed: changed };
+}
+
 function getUsers() {
   const stored = load(STORAGE_KEYS.users, null);
-  // If stored users don't have the real org (check by known id), reset to defaults
-  if (!stored || !stored.find(u => u.username === 'amadani')) {
-    save(STORAGE_KEYS.users, DEFAULT_USERS);
-    return DEFAULT_USERS;
+  if (!stored || !Array.isArray(stored) || !stored.length) {
+    const seeded = _reconcileUsers(DEFAULT_USERS).users;
+    save(STORAGE_KEYS.users, seeded);
+    return seeded;
   }
-  // Ensure existing stored users have division field from DEFAULT_USERS
-  const hasDiv = stored.some(u => u.division);
-  if (!hasDiv) {
-    // Merge divisions from DEFAULT_USERS
-    const merged = stored.map(u => {
-      const def = DEFAULT_USERS.find(d => d.id === u.id);
-      return def ? { ...u, division: def.division || u.division } : u;
-    });
-    save(STORAGE_KEYS.users, merged);
-    return merged;
-  }
+  // Never trust a stored list blindly: union in missing seeded accounts and
+  // repair blank fields / missing passwords before anything reads it.
+  const r = _reconcileUsers(stored);
+  if (r.changed) { save(STORAGE_KEYS.users, r.users); return r.users; }
   return stored;
 }
 function getTasks() { return load(STORAGE_KEYS.tasks, []); }
@@ -3798,10 +3891,12 @@ function toggleLoginPw() {
 }
 
 function doLogin() {
-  const u = document.getElementById('loginUser').value.trim();
+  // Usernames are matched case- and whitespace-insensitively; "EDeraan " and
+  // "ederaan" are the same account.
+  const u = uname({ username: document.getElementById('loginUser').value });
   const p = document.getElementById('loginPass').value;
   const users = getUsers();
-  const user = users.find(x => x.username === u && x.password === p);
+  const user = users.find(x => uname(x) === u && x.password === p);
   if (!user) { document.getElementById('loginErr').style.display = 'block'; return; }
   currentUser = user;
   save(STORAGE_KEYS.session, user.id);
@@ -3814,7 +3909,7 @@ function doLogin() {
   // Sign in to Firebase Auth FIRST, then sync — otherwise a clean session
   // (incognito / new device / new employee) fires permission-denied reads
   // before auth resolves.
-  _fbSignInSilently(u, p).then(function(cred){
+  _fbSignInSilently(user.username, p).then(function(cred){
     if (cred && cred.user) initFirebaseSync();
     else _startSyncWhenAuthReady();
   });
@@ -3851,11 +3946,16 @@ async function saveForceChange() {
   const err = document.getElementById('fpErr');
   if (np.length < 6) { err.textContent = 'Min 6 characters.'; err.style.display='block'; return; }
   if (np !== cp) { err.textContent = 'Passwords do not match.'; err.style.display='block'; return; }
-  // Update Firebase Auth password if available (non-blocking on failure)
-  if (_fbAuth && _fbAuth.currentUser) {
-    try { await _fbAuth.currentUser.updatePassword(np); } catch(e) { /* silent — local update still proceeds */ }
+  // Update the Firebase Auth password too. If the silent sign-in hasn't
+  // resolved yet, sign in with the OLD password first — otherwise Auth keeps
+  // the old password while the app moves on, and every later login fails to
+  // authenticate (app password no longer matches Auth) and loses sync.
+  if (_fbAuth) {
+    try {
+      if (!_fbAuth.currentUser) await _fbSignInSilently(currentUser.username, currentUser.password);
+      if (_fbAuth.currentUser) await _fbAuth.currentUser.updatePassword(np);
+    } catch(e) { console.warn('Auth password update failed:', e && e.code); }
   }
-  // Original logic — unchanged
   const users = getUsers();
   const idx = users.findIndex(x => x.id === currentUser.id);
   users[idx].password = np;
@@ -5638,9 +5738,12 @@ function addUser() {
   const email = document.getElementById('nuEmail').value.trim();
   const role = document.getElementById('nuRole').value;
   const pw = document.getElementById('nuPw').value;
+  // `division` used to be referenced here without ever being declared, which
+  // threw a ReferenceError and silently aborted the whole function.
+  const division = document.getElementById('nuDivision')?.value || 'pmo';
   if (!name || !username || !email || !pw) { toast('Fill all fields.', 'error'); return; }
   const users = getUsers();
-  if (users.find(u=>u.username===username)) { toast('Username already taken.', 'error'); return; }
+  if (users.find(u=>uname(u)===username)) { toast('Username already taken.', 'error'); return; }
   const newUser = { id:'u'+Date.now(), username, password:pw, name, role, email, userType:'user', division, projects:[], forceChange:true };
   users.push(newUser);
   saveUsers(users);
@@ -6741,15 +6844,16 @@ function saveEmployee(uid) {
     users[idx].role      = role;
     users[idx].grade     = grade;
     users[idx].reportsTo = reports;
+    if (division) users[idx].division = division;   // was read but never stored
     if (pw) users[idx].password = pw;
     saveUsers(users);
     toast(`${name} updated.`, 'success');
   } else {
     // Add new
     if (!pw) { errEl.textContent='Initial password is required.'; errEl.style.display='block'; return; }
-    if (users.find(u => u.username === username)) { errEl.textContent='Username already taken.'; errEl.style.display='block'; return; }
+    if (users.find(u => uname(u) === username)) { errEl.textContent='Username already taken.'; errEl.style.display='block'; return; }
     const newId = 'u' + Date.now();
-    users.push({ id:newId, username, password:pw, name, role, email, title, grade, reportsTo:reports, userType:'user', projects:[], forceChange:true });
+    users.push({ id:newId, username, password:pw, name, role, email, title, grade, reportsTo:reports, division:(division||'pmo'), userType:'user', projects:[], forceChange:true });
     saveUsers(users);
     // Silently create Firebase Auth account (non-blocking)
     if (_fbAuth) _fbAuth.createUserWithEmailAndPassword(usernameToEmail(username), pw).catch(e => {
