@@ -1252,9 +1252,17 @@ function showBatchImportPanel() {
         ✔ Skips vacation / leave rows automatically<br>
         ✔ Ignores empty rows and unfilled hours cells
       </div>
+      <div id="biDrop" style="border:2px dashed var(--border2);border-radius:12px;padding:22px 18px;text-align:center;margin-bottom:16px;transition:.15s;">
+        <div style="font-size:26px;line-height:1;margin-bottom:8px;">📂</div>
+        <div id="biDropLabel" style="font-size:14px;font-weight:600;">Drag folders or files here</div>
+        <div style="font-size:12px;color:var(--text3);margin-top:5px;line-height:1.7;">
+          Easiest way — drag the month folders straight from your file manager.<br>
+          Sub-folders are read automatically. Drop several folders at once.
+        </div>
+      </div>
       <div style="display:flex;gap:10px;flex-wrap:wrap;">
         <button class="btn btn-primary" onclick="closeModal();triggerBatchImport('accumulate', true)">
-          📁 Import a whole folder (all months)
+          📁 Browse for a folder
         </button>
         <button class="btn btn-ghost" onclick="closeModal();triggerBatchImport('accumulate')">
           📥 Pick individual files
@@ -1270,8 +1278,10 @@ function showBatchImportPanel() {
         </button>
       </div>
       <div style="margin-top:12px;font-size:11px;color:var(--text3);">
-        <b>Import a whole folder</b> — pick one parent folder and it walks every sub-folder inside it,
-        so month folders are all taken in a single selection. Non-Excel files are ignored.<br>
+        <b>Browse for a folder</b> — in the picker, click the folder <i>once</i> to highlight it, then press
+        <b>Upload / تحميل</b>. Pressing <b>Open / فتح</b> (or double-clicking) just goes inside it. If you do end up
+        inside the folder, pressing Upload there still works. Chrome then asks you to confirm the file count.
+        Non-Excel files are ignored.<br>
         Both import buttons use <b>Add / Accumulate</b>: each file is authoritative for the days it contains:
         those days are rewritten from the sheet, so uploading the same file twice changes nothing.
         Other months and days not in the file are left alone. You can select every employee and
@@ -1284,6 +1294,7 @@ function showBatchImportPanel() {
       </div>
     </div>`;
   document.getElementById('taskModal').classList.add('open');
+  _bindDropZone();
 }
 
 function toggleImportMenu(id) {
@@ -1417,31 +1428,97 @@ function parseLogWorkbook(wb) {
   const taskMap      = {};
   const coveredDates = [];   // dates this workbook is authoritative for
   const warnings     = [];
+  const months       = [];   // which YYYY-MM this workbook was read as
   let detectedName   = '';
-  let globalYear     = new Date().getFullYear();
-  let globalMonth    = new Date().getMonth() + 1;
 
   const MONTH_MAP = { jan:1,feb:2,mar:3,apr:4,may:5,jun:6,
                       jul:7,aug:8,sep:9,oct:10,nov:11,dec:12,
                       january:1,february:2,march:3,april:4,june:6,
-                      july:7,august:8,september:9,october:10,november:11,december:12 };
+                      july:7,august:8,september:9,october:10,november:11,december:12,
+                      يناير:1,فبراير:2,مارس:3,ابريل:4,أبريل:4,مايو:5,يونيو:6,
+                      يوليو:7,اغسطس:8,أغسطس:8,سبتمبر:9,اكتوبر:10,أكتوبر:10,نوفمبر:11,ديسمبر:12 };
 
-  daySheets.forEach(sheetName => {
-    const ws      = wb.Sheets[sheetName];
-    const rows    = XLSX.utils.sheet_to_json(ws, { header:1, defval:'', raw:false });
-    const rawRows = XLSX.utils.sheet_to_json(ws, { header:1, defval:'', raw:true });
-    const day     = parseInt(sheetName, 10);
-    if (!(day >= 1 && day <= 31)) return;
+  // Read every day sheet once
+  const sheets = daySheets.map(name => {
+    const ws = wb.Sheets[name];
+    return {
+      name, day: parseInt(name, 10),
+      rows:    XLSX.utils.sheet_to_json(ws, { header:1, defval:'', raw:false }),
+      rawRows: XLSX.utils.sheet_to_json(ws, { header:1, defval:'', raw:true })
+    };
+  }).filter(sh => sh.day >= 1 && sh.day <= 31);
 
-    // ── Year / month from header rows ──
-    for (let ri = 0; ri <= Math.min(3, rows.length - 1); ri++) {
-      const row = rows[ri] || [];
-      for (let ci = 0; ci < row.length; ci++) {
+  // Turn a cell into a real Date, or null
+  function toDate(v) {
+    if (v === null || v === undefined || v === '') return null;
+    if (v instanceof Date) return isNaN(v) ? null : v;
+    if (typeof v === 'number') {
+      if (v < 30000 || v > 80000) return null;             // not a plausible serial date
+      const u = new Date(Math.round((v - 25569) * 86400000));
+      return new Date(u.getUTCFullYear(), u.getUTCMonth(), u.getUTCDate());
+    }
+    const t = String(v).trim();
+    let m = t.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4})$/);   // dd/mm/yyyy
+    if (m) { const d = new Date(+m[3], +m[2] - 1, +m[1]); return isNaN(d) ? null : d; }
+    m = t.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (m) { const d = new Date(+m[1], +m[2] - 1, +m[3]); return isNaN(d) ? null : d; }
+    return null;
+  }
+
+  // ── Resolve month + year for each sheet ────────────────────────────
+  // Deliberately NOT defaulting to today's date. A template whose header
+  // month can't be read used to dump every sheet into the current month,
+  // so e.g. a February file landed on August dates and overwrote them.
+  sheets.forEach(sh => {
+    // Only the rows ABOVE the column-header row belong to the sheet's own header
+    // block. Scanning into the data rows would let a task's "Expected End Date"
+    // decide the month, which is not what it means.
+    sh.hdrRow = -1;
+    for (let ri = 0; ri <= Math.min(8, sh.rows.length - 1); ri++) {
+      const c = mapHeaderRow(sh.rows[ri] || []);
+      if (c.task !== undefined && (c.hours !== undefined || c.code !== undefined)) { sh.hdrRow = ri; break; }
+    }
+    const limit = sh.hdrRow > 0 ? sh.hdrRow - 1 : Math.min(2, sh.rows.length - 1);
+
+    let byDate = null, monthName = null, year = null;
+    for (let ri = 0; ri <= limit; ri++) {
+      const row = sh.rows[ri] || [], raw = sh.rawRows[ri] || [];
+      for (let ci = 0; ci < Math.max(row.length, raw.length); ci++) {
+        const d = toDate(raw[ci] !== '' && raw[ci] !== undefined ? raw[ci] : row[ci]);
+        // A header date whose day equals the tab name proves it's this sheet's date
+        if (d && d.getFullYear() >= 2020 && d.getDate() === sh.day) byDate = d;
         const v = cellStr(row[ci]);
-        if (/^\d{4}$/.test(v) && parseInt(v) >= 2020) globalYear = parseInt(v);
+        if (/^\d{4}$/.test(v) && parseInt(v) >= 2020 && parseInt(v) <= 2100) year = parseInt(v);
         const mo = MONTH_MAP[v.toLowerCase()];
-        if (mo) globalMonth = mo;
+        if (mo) monthName = mo;
       }
+    }
+    if (byDate)                  sh.meta = { year: byDate.getFullYear(), month: byDate.getMonth() + 1, strong: true };
+    else if (monthName && year)  sh.meta = { year, month: monthName, strong: true };
+    else                         sh.meta = { year, month: monthName, strong: false };
+  });
+
+  // Consensus from the confident sheets fills in the unconfident ones
+  const votes = {};
+  sheets.filter(sh => sh.meta.strong).forEach(sh => {
+    const k = sh.meta.year + '-' + sh.meta.month;
+    votes[k] = (votes[k] || 0) + 1;
+  });
+  const winner = Object.keys(votes).sort((a, b) => votes[b] - votes[a])[0];
+  const consensus = winner
+    ? { year: parseInt(winner.split('-')[0], 10), month: parseInt(winner.split('-')[1], 10) }
+    : null;
+
+  sheets.forEach(sh => {
+    const { rows, rawRows, day, name: sheetName } = sh;
+
+    let yy = sh.meta.year, mm = sh.meta.month;
+    if (!yy && consensus) yy = consensus.year;
+    if (!mm && consensus) mm = consensus.month;
+    if (!yy || !mm) {
+      warnings.push('Sheet ' + sheetName + ': no month/year in the header — sheet skipped. ' +
+                    'Add the month name or a full date to the header row.');
+      return;
     }
 
     // ── Employee name ──
@@ -1459,7 +1536,9 @@ function parseLogWorkbook(wb) {
       }
     }
 
-    const dateStr = `${globalYear}-${String(globalMonth).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
+    const dateStr = `${yy}-${String(mm).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
+    const ym = dateStr.slice(0, 7);
+    if (months.indexOf(ym) === -1) months.push(ym);
 
     // ── Locate the header row and map its columns ──
     let cols = null, dataStartRow = 4;
@@ -1542,7 +1621,9 @@ function parseLogWorkbook(wb) {
     if (rowsOnThisDay > 0 && coveredDates.indexOf(dateStr) === -1) coveredDates.push(dateStr);
   });
 
-  return { taskMap, coveredDates, warnings, detectedName, year: globalYear, month: globalMonth };
+  return { taskMap, coveredDates, warnings, months, detectedName,
+           year: consensus ? consensus.year : null,
+           month: consensus ? consensus.month : null };
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -1740,11 +1821,62 @@ function triggerBatchImport(mode, folder) {
   if (folder) {
     inp.setAttribute('webkitdirectory', '');
     inp.setAttribute('directory', '');
+    inp.removeAttribute('accept');   // an accept filter confuses the folder picker
   } else {
     inp.removeAttribute('webkitdirectory');
     inp.removeAttribute('directory');
+    inp.setAttribute('accept', '.xlsx,.xls');
   }
   inp.click();
+}
+
+// ═══════════════════════════════════════════════════════════
+// DRAG & DROP — accepts loose files and whole folders, and
+// walks sub-folders, so month folders can be dropped together.
+// webkitGetAsEntry() must be read synchronously inside the drop
+// event; the item list is emptied as soon as we await.
+// ═══════════════════════════════════════════════════════════
+async function _collectDropped(dt) {
+  const items   = Array.from(dt.items || []);
+  const entries = items.map(it => (it.webkitGetAsEntry ? it.webkitGetAsEntry() : null)).filter(Boolean);
+  if (!entries.length) return Array.from(dt.files || []);
+
+  const out = [];
+  const walk = async (entry, path) => {
+    if (entry.isFile) {
+      const f = await new Promise((res, rej) => entry.file(res, rej));
+      try { Object.defineProperty(f, 'webkitRelativePath', { value: path + f.name }); } catch(e){}
+      out.push(f);
+    } else if (entry.isDirectory) {
+      const reader = entry.createReader();
+      let batch;
+      do {
+        batch = await new Promise((res, rej) => reader.readEntries(res, rej));
+        for (const e of batch) await walk(e, path + entry.name + '/');
+      } while (batch.length);
+    }
+  };
+  for (const e of entries) await walk(e, '');
+  return out;
+}
+
+function _bindDropZone() {
+  const z = document.getElementById('biDrop');
+  if (!z) return;
+  const on  = () => { z.style.borderColor = '#C0392B'; z.style.background = 'rgba(192,57,43,0.07)'; };
+  const off = () => { z.style.borderColor = 'var(--border2)'; z.style.background = 'transparent'; };
+  ['dragenter','dragover'].forEach(ev => z.addEventListener(ev, e => { e.preventDefault(); e.stopPropagation(); on(); }));
+  ['dragleave','dragend'].forEach(ev => z.addEventListener(ev, e => { e.preventDefault(); e.stopPropagation(); off(); }));
+  z.addEventListener('drop', async e => {
+    e.preventDefault(); e.stopPropagation(); off();
+    const label = document.getElementById('biDropLabel');
+    if (label) label.textContent = 'Reading…';
+    let files = [];
+    try { files = await _collectDropped(e.dataTransfer); }
+    catch(err) { toast('Could not read that drop: ' + err.message, 'error'); return; }
+    if (!files.length) { toast('Nothing usable in that drop.', 'error'); if (label) label.textContent = 'Drop files or folders here'; return; }
+    handleBatchImport(files, 'accumulate');
+  });
 }
 
 // Fuzzy match employee name from sheet to a user record
@@ -1775,12 +1907,20 @@ function matchUserByName(detectedName, users) {
   return u || null;
 }
 
-async function handleBatchImport(input) {
-  let files = Array.from(input.files);
-  input.value = '';
-  input.removeAttribute('webkitdirectory');
-  input.removeAttribute('directory');
-  const importMode = input.dataset.importMode || 'accumulate';
+async function handleBatchImport(source, modeArg) {
+  // `source` is either the hidden <input> or an array of File objects (drag & drop)
+  let files, importMode;
+  if (Array.isArray(source)) {
+    files = source.slice();
+    importMode = modeArg || 'accumulate';
+  } else {
+    files = Array.from(source.files);
+    source.value = '';
+    source.removeAttribute('webkitdirectory');
+    source.removeAttribute('directory');
+    source.setAttribute('accept', '.xlsx,.xls');
+    importMode = source.dataset.importMode || 'accumulate';
+  }
 
   // A folder selection brings along everything in it, so keep only real
   // workbooks: no temp lock files (~$…), no hidden files, no other formats.
@@ -1877,10 +2017,10 @@ async function handleBatchImport(input) {
   const totalAdded   = results.reduce((s,r) => s + r.added, 0);
   const totalUpdated = results.reduce((s,r) => s + r.updated, 0);
   const okRows   = results.map(r =>
-    `<tr><td style="padding:4px 8px;">${r.name}</td><td style="padding:4px 8px;color:var(--green);">+${r.added} new</td><td style="padding:4px 8px;color:var(--gold);">${r.updated > 0 ? '~'+r.updated+' updated':''}</td><td style="padding:4px 8px;font-size:11px;color:var(--text2);">${r.entries||0} entries · ${r.days||0} day(s)</td><td style="padding:4px 8px;font-size:11px;color:var(--text3);">${r.fileName}</td></tr>`
+    `<tr><td style="padding:4px 8px;">${r.name}</td><td style="padding:4px 8px;color:var(--green);">+${r.added} new</td><td style="padding:4px 8px;color:var(--gold);">${r.updated > 0 ? '~'+r.updated+' updated':''}</td><td style="padding:4px 8px;font-size:11px;font-family:var(--mono);">${escHtml(r.months||'?')}${r.warn?` <span style="color:var(--red);" title="sheets skipped — no month in header">⚠${r.warn}</span>`:''}</td><td style="padding:4px 8px;font-size:11px;color:var(--text2);">${r.entries||0} entries · ${r.days||0} day(s)</td><td style="padding:4px 8px;font-size:11px;color:var(--text3);">${r.fileName}</td></tr>`
   ).join('');
   const errRows  = unmatched.map(r =>
-    `<tr><td style="padding:4px 8px;color:var(--red);" colspan="4">⚠ Could not match employee: <b>${r.detectedName}</b></td><td style="padding:4px 8px;font-size:11px;color:var(--text3);">${r.fileName}</td></tr>`
+    `<tr><td style="padding:4px 8px;color:var(--red);" colspan="5">⚠ Could not match employee: <b>${r.detectedName}</b></td><td style="padding:4px 8px;font-size:11px;color:var(--text3);">${r.fileName}</td></tr>`
   ).join('');
 
   document.getElementById('taskModalContent').innerHTML = `
@@ -1901,6 +2041,7 @@ async function handleBatchImport(input) {
             <th style="padding:4px 8px;text-align:left;">Employee</th>
             <th style="padding:4px 8px;text-align:left;">Added</th>
             <th style="padding:4px 8px;text-align:left;">Updated</th>
+            <th style="padding:4px 8px;text-align:left;">Read as month</th>
             <th style="padding:4px 8px;text-align:left;">Time logged</th>
             <th style="padding:4px 8px;text-align:left;">File</th>
           </tr></thead>
@@ -1909,7 +2050,9 @@ async function handleBatchImport(input) {
       </div>
       ${unmatched.length > 0 ? `
       <div style="margin-top:12px;padding:10px;background:rgba(192,57,43,0.07);border-radius:8px;font-size:12px;color:var(--text2);">
-        💡 <b>Tip:</b> Unmatched files usually mean the employee name in the sheet header doesn't closely match any registered user. 
+        💡 <b>Check the "Read as month" column</b> — it shows which month each file was actually understood as.
+        A file showing the wrong month has no month name and no full date in its header row.<br>
+        <b>Tip:</b> Unmatched files usually mean the employee name in the sheet header doesn't closely match any registered user. 
         Check the <b>Name</b> field in row 2 of the sheet matches the employee's full name in the system.
       </div>` : ''}
     </div>
