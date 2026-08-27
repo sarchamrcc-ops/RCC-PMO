@@ -1069,92 +1069,129 @@ async function ensureXLSX() {
 // taskMap key = normalizedTitle + '||' + projId
 // ═══════════════════════════════════════════════════════════
 function parseLogWorkbook(wb) {
-  const projects  = getProjects();
+  const projects = getProjects();
 
   // Build project-code → project-id lookup (case-insensitive, also id pass-through, also name fragments)
   const codeToId = {};
   projects.forEach(p => {
-    codeToId[p.code.trim().toUpperCase()]  = p.id;
-    codeToId[p.id.trim().toUpperCase()]    = p.id;
-    // some sheets write the project name — try first word of name too
-    const firstWord = p.name.trim().split(/\s+/)[0].toUpperCase();
+    codeToId[String(p.code||'').trim().toUpperCase()] = p.id;
+    codeToId[String(p.id||'').trim().toUpperCase()]   = p.id;
+    const firstWord = String(p.name||'').trim().split(/\s+/)[0].toUpperCase();
     if (firstWord.length > 2) codeToId[firstWord] = codeToId[firstWord] || p.id;
   });
 
-  // Helper: robustly parse a date from whatever the sheet gives us
+  // ── Date helpers ─────────────────────────────────────────
+  // NEVER use toISOString() here. The sheets are read in the browser's local
+  // timezone; in any UTC+ zone (Riyadh is UTC+3) toISOString() rolls the date
+  // back one day, so 18/08 was being stored as 2026-08-17.
+  function ymd(d) {
+    return d.getFullYear() + '-' +
+           String(d.getMonth() + 1).padStart(2, '0') + '-' +
+           String(d.getDate()).padStart(2, '0');
+  }
   function parseDate(raw) {
-    if (!raw && raw !== 0) return '';
+    if (raw === null || raw === undefined || raw === '') return '';
     try {
       let d;
-      if (raw instanceof Date) { d = raw; }
-      else if (typeof raw === 'number') {
-        // Excel serial date
-        d = new Date(Math.round((raw - 25569) * 86400 * 1000));
+      if (raw instanceof Date) {
+        d = raw;
+      } else if (typeof raw === 'number') {
+        // Excel serial → read its UTC parts, rebuild as a local date
+        const u = new Date(Math.round((raw - 25569) * 86400000));
+        d = new Date(u.getUTCFullYear(), u.getUTCMonth(), u.getUTCDate());
       } else {
-        d = new Date(raw);
+        const s = String(raw).trim();
+        let m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+        if (m) return m[0];
+        m = s.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4})$/); // dd/mm/yyyy
+        if (m) d = new Date(+m[3], +m[2] - 1, +m[1]);
+        else   d = new Date(s);
       }
-      if (isNaN(d)) return '';
-      return d.toISOString().slice(0, 10);
-    } catch(e) { return ''; }
+      if (!d || isNaN(d)) return '';
+      return ymd(d);
+    } catch (e) { return ''; }
   }
 
-  // Helper: extract a clean text string from a cell value
   function cellStr(v) {
     if (v === null || v === undefined) return '';
     if (v instanceof Date) return '';
     return String(v).trim();
   }
 
+  // ── Header → column mapping ──────────────────────────────
+  // Reading columns by header text instead of fixed positions is what stops the
+  // "Current progress %" column from being scooped up as Hours.
+  const HEADER_PATTERNS = [
+    ['hours',    /hour|hrs\b|ساع/i],
+    ['progress', /progress|نسب/i],
+    ['due',      /expected|end\s*date|due\s*date|تاريخ/i],
+    ['code',     /project\s*code|كود|رمز/i],
+    ['pno',      /project\s*(no|num|#)/i],
+    ['pname',    /project\s*name|اسم\s*المشروع/i],
+    ['desc',     /desc|brief|breif|وصف/i],
+    ['note',     /note|remark|ملاحظ/i],
+    ['task',     /^task$|task\b|activity|مهم|عمل/i],
+    ['no',       /^(no\.?|s\.?\s*no\.?|#|م)$/i],
+  ];
+  const DEFAULT_COLS = { no:0, task:1, pname:2, pno:3, code:4, desc:5, due:6, hours:7, progress:8, note:9 };
+
+  function mapHeaderRow(row) {
+    const cols = {};
+    const used = {};
+    for (let ci = 0; ci < row.length; ci++) {
+      const txt = cellStr(row[ci]);
+      if (!txt) continue;
+      for (const [field, re] of HEADER_PATTERNS) {
+        if (cols[field] !== undefined) continue;
+        if (used[ci]) break;
+        if (re.test(txt)) { cols[field] = ci; used[ci] = true; break; }
+      }
+    }
+    return cols;
+  }
+
   const daySheets = wb.SheetNames.filter(n => /^\d+$/.test(n.trim()));
   if (daySheets.length === 0) throw new Error('No daily-log sheets found (expected sheets named 1–31).');
 
   const taskMap      = {};
+  const coveredDates = [];   // dates this workbook is authoritative for
+  const warnings     = [];
   let detectedName   = '';
   let globalYear     = new Date().getFullYear();
   let globalMonth    = new Date().getMonth() + 1;
 
-  // Month name → number
   const MONTH_MAP = { jan:1,feb:2,mar:3,apr:4,may:5,jun:6,
                       jul:7,aug:8,sep:9,oct:10,nov:11,dec:12,
                       january:1,february:2,march:3,april:4,june:6,
                       july:7,august:8,september:9,october:10,november:11,december:12 };
 
   daySheets.forEach(sheetName => {
-    const ws   = wb.Sheets[sheetName];
-    const rows = XLSX.utils.sheet_to_json(ws, { header:1, defval:'', raw:false });
+    const ws      = wb.Sheets[sheetName];
+    const rows    = XLSX.utils.sheet_to_json(ws, { header:1, defval:'', raw:false });
     const rawRows = XLSX.utils.sheet_to_json(ws, { header:1, defval:'', raw:true });
-    const day  = parseInt(sheetName, 10);
+    const day     = parseInt(sheetName, 10);
+    if (!(day >= 1 && day <= 31)) return;
 
-    // ── Extract year/month from header rows ──────────────────
-    // Scan rows 0–3 for year (4-digit number) and month name
+    // ── Year / month from header rows ──
     for (let ri = 0; ri <= Math.min(3, rows.length - 1); ri++) {
-      const row = rows[ri];
+      const row = rows[ri] || [];
       for (let ci = 0; ci < row.length; ci++) {
         const v = cellStr(row[ci]);
-        // Year: standalone 4-digit number ≥ 2020
-        if (/^\d{4}$/.test(v) && parseInt(v) >= 2020) {
-          globalYear = parseInt(v);
-        }
-        // Month name
+        if (/^\d{4}$/.test(v) && parseInt(v) >= 2020) globalYear = parseInt(v);
         const mo = MONTH_MAP[v.toLowerCase()];
         if (mo) globalMonth = mo;
       }
     }
 
-    // ── Extract employee name from row 1 col 1 (Name row) ────
-    if (!detectedName && rows.length > 1) {
-      // row 1 often: ["Name", ACTUAL_NAME, ...]
-      // scan row 1 for a non-empty cell after a "name"-like label
+    // ── Employee name ──
+    if (!detectedName) {
       for (let ri = 0; ri <= Math.min(3, rows.length - 1); ri++) {
-        const row = rows[ri];
+        const row = rows[ri] || [];
         for (let ci = 0; ci < row.length; ci++) {
           const lbl = cellStr(row[ci]).toLowerCase();
           if ((lbl === 'name' || lbl === 'employee name' || lbl === 'الاسم') && ci + 1 < row.length) {
             const candidate = cellStr(row[ci + 1]);
-            if (candidate && candidate.length > 1 && !/^\d+$/.test(candidate)) {
-              detectedName = candidate;
-              break;
-            }
+            if (candidate && candidate.length > 1 && !/^\d+$/.test(candidate)) { detectedName = candidate; break; }
           }
         }
         if (detectedName) break;
@@ -1163,133 +1200,189 @@ function parseLogWorkbook(wb) {
 
     const dateStr = `${globalYear}-${String(globalMonth).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
 
-    // ── Find the header row (contains "Project Code" or "Hours") ──
-    let dataStartRow = 4; // default
-    for (let ri = 2; ri <= Math.min(6, rows.length - 1); ri++) {
-      const rowText = rows[ri].map(v => cellStr(v).toLowerCase()).join(' ');
-      if (rowText.includes('hours') || rowText.includes('project code') || rowText.includes('task')) {
-        dataStartRow = ri + 1;
-        break;
+    // ── Locate the header row and map its columns ──
+    let cols = null, dataStartRow = 4;
+    for (let ri = 0; ri <= Math.min(8, rows.length - 1); ri++) {
+      const candidate = mapHeaderRow(rows[ri] || []);
+      if (candidate.task !== undefined && (candidate.hours !== undefined || candidate.code !== undefined)) {
+        cols = candidate; dataStartRow = ri + 1; break;
       }
     }
+    if (!cols) { cols = Object.assign({}, DEFAULT_COLS); warnings.push('Sheet ' + sheetName + ': header row not recognised — used default column positions.'); }
+    else { for (const k in DEFAULT_COLS) if (cols[k] === undefined) cols[k] = DEFAULT_COLS[k]; }
 
-    // ── Scan task data rows ──────────────────────────────────
+    let rowsOnThisDay = 0;
+
     for (let ri = dataStartRow; ri < rows.length; ri++) {
-      const row    = rows[ri];
+      const row    = rows[ri]    || [];
       const rawRow = rawRows[ri] || [];
 
-      // Skip completely empty rows
-      const nonEmpty = row.filter(v => cellStr(v) !== '');
-      if (nonEmpty.length < 2) continue;
+      if (row.filter(v => cellStr(v) !== '').length < 2) continue;
 
-      // Col 0 = row number (optional — don't require it to be a digit)
-      const no    = cellStr(row[0]);
-      const title = cellStr(row[1]);
-
-      // Skip header-like rows that crept in
+      const title = cellStr(row[cols.task]);
       if (!title) continue;
       const titleLow = title.toLowerCase();
       if (titleLow === 'task' || titleLow === 'no.' || titleLow === 'no' ||
           titleLow === 'description' || titleLow.startsWith('total')) continue;
 
-      // Project code: prefer col 4, fall back scanning cols 2–5 for a matching code
-      let projCode = cellStr(row[4]).toUpperCase();
-      if (!projCode || projCode.length < 2) {
+      // Project code
+      let projCode = cellStr(row[cols.code]).toUpperCase();
+      if (!projCode || !codeToId[projCode]) {
         for (let ci = 2; ci <= Math.min(5, row.length - 1); ci++) {
-          const candidate = cellStr(row[ci]).toUpperCase();
-          if (candidate && codeToId[candidate]) { projCode = candidate; break; }
+          const cand = cellStr(row[ci]).toUpperCase();
+          if (cand && codeToId[cand]) { projCode = cand; break; }
         }
       }
 
-      // Skip vacation / leave rows
       if (projCode === 'VC' || projCode === 'VAC' || projCode === 'LEAVE' ||
           titleLow === 'vacation' || titleLow === 'annual leave' || titleLow === 'off day') continue;
 
-      // Hours: try col 7, then scan for a numeric value in cols 6–9
-      let hours = parseFloat(rawRow[7]);
-      if (isNaN(hours) || hours <= 0) {
-        for (let ci = 6; ci <= Math.min(9, rawRow.length - 1); ci++) {
-          const v = parseFloat(rawRow[ci]);
-          if (!isNaN(v) && v > 0 && v <= 24) { hours = v; break; }
-        }
-      }
-      if (isNaN(hours) || hours <= 0) continue; // truly no hours → skip
+      // ── Hours: ONLY from the mapped hours column. No scanning neighbours. ──
+      let hours = parseFloat(rawRow[cols.hours]);
+      if (isNaN(hours) || hours < 0) hours = parseFloat(cellStr(row[cols.hours]).replace(/[^0-9.]/g, ''));
+      if (isNaN(hours) || hours < 0) hours = 0;
+      if (hours > 24) { warnings.push('Sheet ' + sheetName + ' · "' + title + '": ' + hours + 'h in one day — capped at 24.'); hours = 24; }
 
-      const desc    = cellStr(row[5]);
-      const dueDate = parseDate(rawRow[6]);
+      // ── Progress: accept 0.55 (percent-formatted) or 55 ──
+      let progress = parseFloat(rawRow[cols.progress]);
+      if (isNaN(progress)) progress = parseFloat(cellStr(row[cols.progress]).replace(/[^0-9.]/g, ''));
+      if (isNaN(progress)) progress = null;
+      else {
+        if (progress > 0 && progress <= 1) progress = progress * 100;
+        progress = Math.max(0, Math.min(100, Math.round(progress)));
+      }
+
+      const desc    = cellStr(row[cols.desc]);
+      const note    = cellStr(row[cols.note]);
+      const dueDate = parseDate(rawRow[cols.due] !== '' ? rawRow[cols.due] : row[cols.due]);
       const projId  = codeToId[projCode] || '';
 
-      // Normalise title for deduplication: lowercase + collapse whitespace
       const normTitle = title.toLowerCase().replace(/\s+/g, ' ');
       const key = normTitle + '||' + (projId || projCode);
 
-      if (!taskMap[key]) {
-        taskMap[key] = { title, projId, projCode, totalHours: 0, lastDate: dateStr, desc, dueDate, dayCount: 0 };
-      }
-      taskMap[key].totalHours += hours;
-      taskMap[key].dayCount++;
-      if (dateStr > taskMap[key].lastDate) taskMap[key].lastDate = dateStr;
-      if (dueDate && dueDate > taskMap[key].dueDate) taskMap[key].dueDate = dueDate;
-      if (!taskMap[key].desc && desc) taskMap[key].desc = desc;
+      if (!taskMap[key]) taskMap[key] = { title, projId, projCode, days: {} };
+      const T    = taskMap[key];
+      const prev = T.days[dateStr];
+
+      // Same task listed twice on the SAME day sheet = two rows of real work → sum them.
+      T.days[dateStr] = {
+        hours:    (prev ? prev.hours : 0) + hours,
+        desc:     desc     || (prev ? prev.desc : ''),
+        note:     note     || (prev ? prev.note : ''),
+        due:      dueDate  || (prev ? prev.due  : ''),
+        progress: (progress !== null ? progress : (prev ? prev.progress : null))
+      };
+
+      rowsOnThisDay++;
     }
+
+    // A day sheet with real rows makes this workbook authoritative for that date.
+    // Empty sheets (day off, not filled in yet) are left untouched.
+    if (rowsOnThisDay > 0 && coveredDates.indexOf(dateStr) === -1) coveredDates.push(dateStr);
   });
 
-  return { taskMap, detectedName, year: globalYear, month: globalMonth };
+  return { taskMap, coveredDates, warnings, detectedName, year: globalYear, month: globalMonth };
 }
 
 // ═══════════════════════════════════════════════════════════
 // SHARED: APPLY PARSED TASKS → localStorage
 // ═══════════════════════════════════════════════════════════
-function applyParsedTasks(taskMap, uid, importMode) {
+function applyParsedTasks(parsed, uid, importMode) {
+  // Accepts the full parseLogWorkbook() result. (A bare taskMap still works.)
+  const taskMap      = (parsed && parsed.taskMap) ? parsed.taskMap : (parsed || {});
+  const coveredDates = new Set((parsed && parsed.coveredDates) ? parsed.coveredDates : []);
+
   const amadaniId = getUsers().find(u => u.username === 'amadani')?.id || 'u2';
   const extracted = Object.values(taskMap);
-  if (extracted.length === 0) return { added: 0, updated: 0, removed: 0, skipped: 0 };
+  if (extracted.length === 0) return { added:0, updated:0, removed:0, skipped:0, cleared:0, entries:0, days:0 };
 
-  let tasks   = getTasks();
-  let added   = 0, updated = 0, removed = 0, skipped = 0;
+  let tasks = getTasks();
+  let added = 0, updated = 0, removed = 0, skipped = 0, cleared = 0, entries = 0;
 
   if (importMode === 'replace') {
     removed = tasks.filter(t => t.assignedTo === uid).length;
     tasks   = tasks.filter(t => t.assignedTo !== uid);
+  } else if (coveredDates.size) {
+    // ACCUMULATE — the workbook is the single source of truth for the days it
+    // covers. Clear this user's entries on exactly those days before writing.
+    //
+    // This is the fix for the inflated totals: the log file grows through the
+    // month, so re-uploading it every day used to append the whole month-to-date
+    // sum again and again. Clearing the covered days first makes an import
+    // idempotent — same file twice produces identical time logs — while days
+    // outside the file (and every other month) are left alone.
+    tasks.forEach(t => {
+      if (!Array.isArray(t.timeLogs) || !t.timeLogs.length) return;
+      const before = t.timeLogs.length;
+      t.timeLogs = t.timeLogs.filter(l => !(l.userId === uid && coveredDates.has(l.date)));
+      cleared += before - t.timeLogs.length;
+    });
   }
 
-  extracted.forEach(item => {
-    const logEntry = {
-      userId: uid,
-      hours:  Math.round(item.totalHours * 100) / 100,
-      date:   item.lastDate,
-      note:   (item.desc || '').slice(0, 200)
-    };
+  const round2 = n => Math.round(n * 100) / 100;
 
-    // Find matching existing task: title (normalised) + project + assigned user
+  extracted.forEach(item => {
+    const dates  = Object.keys(item.days).sort();
+    if (!dates.length) return;
+    const latest = item.days[dates[dates.length - 1]];
+
+    // One entry per day that actually has hours. A 0-hour row still carries
+    // description / due date / progress, it just doesn't create a time entry.
+    const logEntries = dates
+      .filter(d => item.days[d].hours > 0)
+      .map(d => {
+        const D = item.days[d];
+        return {
+          userId: uid,
+          date:   d,
+          hours:  round2(D.hours),
+          note:   (D.note || D.desc || '').slice(0, 200),
+          desc:   (D.desc || '').slice(0, 200),
+          due:    D.due || ''
+        };
+      });
+    entries += logEntries.length;
+
+    // Latest day with a value wins for the task-level fields
+    let lastDue = '', lastDesc = '', lastProg = null;
+    dates.forEach(d => {
+      const D = item.days[d];
+      if (D.due)  lastDue  = D.due;
+      if (D.desc) lastDesc = D.desc;
+      if (D.progress !== null && D.progress !== undefined) lastProg = D.progress;
+    });
+
     const normItemTitle = item.title.toLowerCase().replace(/\s+/g, ' ');
     const existing = tasks.findIndex(t =>
-      t.title.trim().toLowerCase().replace(/\s+/g, ' ') === normItemTitle &&
+      String(t.title || '').trim().toLowerCase().replace(/\s+/g, ' ') === normItemTitle &&
       t.project === item.projId &&
       t.assignedTo === uid
     );
 
     if (importMode === 'accumulate' && existing >= 0) {
-      tasks[existing].timeLogs = [...(tasks[existing].timeLogs || []), logEntry];
-      tasks[existing].updates.push({
+      const t = tasks[existing];
+      t.timeLogs = [...(t.timeLogs || []), ...logEntries];
+      if (lastDue)  t.dueDate     = lastDue;
+      if (lastDesc) t.description = lastDesc;
+      if (lastProg !== null) t.progress = lastProg;
+      t.updates = [...(t.updates || []), {
         userId: currentUser.id,
-        text: 'Hours accumulated via timesheet import: +' + logEntry.hours + 'h',
+        text: 'Timesheet import · ' + logEntries.length + ' day(s), ' +
+              round2(logEntries.reduce((s, l) => s + l.hours, 0)) + 'h',
         ts: Date.now(), type: 'system'
-      });
-      if (item.dueDate && item.dueDate > (tasks[existing].dueDate || '')) {
-        tasks[existing].dueDate = item.dueDate;
-      }
+      }];
       updated++;
     } else if (existing < 0) {
       const newId = 'T' + String(Date.now()).slice(-6) + String(Math.floor(Math.random() * 1000)).padStart(3, '0');
       tasks.push({
         id: newId,
         project: item.projId, type: '', title: item.title,
-        description: item.desc || item.projCode || '',
+        description: lastDesc || item.projCode || '',
         assignedTo: uid, assignedBy: amadaniId,
         client: '', criticality: 'Normal', status: 'In Progress',
-        createdAt: Date.now(), dueDate: item.dueDate || '', currentHolder: uid,
-        timeLogs: [logEntry],
+        progress: lastProg !== null ? lastProg : 0,
+        createdAt: Date.now(), dueDate: lastDue || '', currentHolder: uid,
+        timeLogs: logEntries,
         incomplete: !item.projId,
         missingFields: item.projId ? [] : ['Project'],
         updates: [{ userId: currentUser.id, text: 'Imported from daily log sheet (' + importMode + ').', ts: Date.now(), type: 'system' }],
@@ -1297,12 +1390,12 @@ function applyParsedTasks(taskMap, uid, importMode) {
       });
       added++;
     } else {
-      skipped++; // replace mode and task already exists
+      skipped++;
     }
   });
 
   saveTasks(tasks);
-  return { added, updated, removed, skipped };
+  return { added, updated, removed, skipped, cleared, entries, days: coveredDates.size };
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -1326,17 +1419,19 @@ async function handleEmployeeExcel(input, uid) {
   reader.onload = function(e) {
     try {
       const wb = XLSX.read(new Uint8Array(e.target.result), { type: 'array', cellDates: true });
-      const { taskMap } = parseLogWorkbook(wb);
-      const extracted = Object.values(taskMap);
+      const parsed = parseLogWorkbook(wb);
+      const extracted = Object.values(parsed.taskMap);
       if (extracted.length === 0) {
         toast('No tasks found in this file — check that sheets are named 1–31 and hours column is filled.', 'error');
         return;
       }
-      const { added, updated, removed } = applyParsedTasks(taskMap, uid, importMode);
+      const { added, updated, removed, entries, days } = applyParsedTasks(parsed, uid, importMode);
       let msg = '✓ ' + added + ' added';
       if (updated > 0) msg += ', ' + updated + ' updated';
+      if (entries > 0) msg += ' · ' + entries + ' day-entries across ' + days + ' day(s)';
       if (removed > 0) msg += ' (' + removed + ' previous tasks replaced)';
       toast(msg, 'success');
+      if (parsed.warnings && parsed.warnings.length) console.warn('Import warnings:', parsed.warnings);
       if (document.getElementById('viewEmployee') && !document.getElementById('viewEmployee').classList.contains('hidden')) renderEmployee();
       if (document.getElementById('viewTasks')   && !document.getElementById('viewTasks').classList.contains('hidden'))   filterTasks();
     } catch(err) {
@@ -1409,7 +1504,8 @@ async function handleBatchImport(input) {
       reader.onload = function(e) {
         try {
           const wb = XLSX.read(new Uint8Array(e.target.result), { type: 'array', cellDates: true });
-          const { taskMap, detectedName } = parseLogWorkbook(wb);
+          const parsed = parseLogWorkbook(wb);
+          const detectedName = parsed.detectedName;
           const matchedUser = matchUserByName(detectedName, allUsers);
 
           if (!matchedUser) {
@@ -1418,8 +1514,9 @@ async function handleBatchImport(input) {
             return;
           }
 
-          const { added, updated, removed } = applyParsedTasks(taskMap, matchedUser.id, importMode);
-          results.push({ name: matchedUser.name, fileName: file.name, added, updated, removed });
+          const { added, updated, removed, entries, days, cleared } = applyParsedTasks(parsed, matchedUser.id, importMode);
+          if (parsed.warnings && parsed.warnings.length) console.warn(file.name + ' warnings:', parsed.warnings);
+          results.push({ name: matchedUser.name, fileName: file.name, added, updated, removed, entries, days, cleared });
           resolve(matchedUser);
         } catch(err) {
           unmatched.push({ fileName: file.name, detectedName: '(parse error: ' + err.message + ')' });
@@ -1439,10 +1536,10 @@ async function handleBatchImport(input) {
   const totalAdded   = results.reduce((s,r) => s + r.added, 0);
   const totalUpdated = results.reduce((s,r) => s + r.updated, 0);
   const okRows   = results.map(r =>
-    `<tr><td style="padding:4px 8px;">${r.name}</td><td style="padding:4px 8px;color:var(--green);">+${r.added} new</td><td style="padding:4px 8px;color:var(--gold);">${r.updated > 0 ? '~'+r.updated+' updated':''}</td><td style="padding:4px 8px;font-size:11px;color:var(--text3);">${r.fileName}</td></tr>`
+    `<tr><td style="padding:4px 8px;">${r.name}</td><td style="padding:4px 8px;color:var(--green);">+${r.added} new</td><td style="padding:4px 8px;color:var(--gold);">${r.updated > 0 ? '~'+r.updated+' updated':''}</td><td style="padding:4px 8px;font-size:11px;color:var(--text2);">${r.entries||0} entries · ${r.days||0} day(s)</td><td style="padding:4px 8px;font-size:11px;color:var(--text3);">${r.fileName}</td></tr>`
   ).join('');
   const errRows  = unmatched.map(r =>
-    `<tr><td style="padding:4px 8px;color:var(--red);" colspan="3">⚠ Could not match employee: <b>${r.detectedName}</b></td><td style="padding:4px 8px;font-size:11px;color:var(--text3);">${r.fileName}</td></tr>`
+    `<tr><td style="padding:4px 8px;color:var(--red);" colspan="4">⚠ Could not match employee: <b>${r.detectedName}</b></td><td style="padding:4px 8px;font-size:11px;color:var(--text3);">${r.fileName}</td></tr>`
   ).join('');
 
   document.getElementById('taskModalContent').innerHTML = `
@@ -1461,6 +1558,7 @@ async function handleBatchImport(input) {
             <th style="padding:4px 8px;text-align:left;">Employee</th>
             <th style="padding:4px 8px;text-align:left;">Added</th>
             <th style="padding:4px 8px;text-align:left;">Updated</th>
+            <th style="padding:4px 8px;text-align:left;">Time logged</th>
             <th style="padding:4px 8px;text-align:left;">File</th>
           </tr></thead>
           <tbody>${okRows}${errRows}</tbody>
@@ -3259,9 +3357,8 @@ function initFirebase() {
     _fbAuth.onAuthStateChanged(function(fbUser) {
       if (fbUser && !currentUser) {
         // Firebase Auth token present but no local session — restore from it
-        const un = (emailToUsername(fbUser.email) || '').trim().toLowerCase();
-        const byName = function(x){ return ((x.username||'')+'').trim().toLowerCase() === un; };
-        const user = getUsers().find(byName) || DEFAULT_USERS.find(byName);
+        const uname = emailToUsername(fbUser.email);
+        const user = getUsers().find(u => u.username === uname) || DEFAULT_USERS.find(u => u.username === uname);
         if (user) {
           currentUser = user;
           save(STORAGE_KEYS.session, user.id);
@@ -3269,7 +3366,7 @@ function initFirebase() {
           document.getElementById('loginScreen').style.display = 'none';
           document.getElementById('app').classList.add('visible');
           if (user.forceChange) showForceChangeModal(); else initApp();
-          _startSyncWhenAuthReady();
+          setTimeout(initFirebaseSync, 500);
         }
       }
       // If currentUser already set (by legacy restore/login), do nothing
@@ -3280,61 +3377,15 @@ function initFirebase() {
 // Silent Firebase Auth sign-in — called after successful legacy login.
 // Non-blocking: app is already shown; this just builds up the Auth account
 // in the background so DB rules can eventually be locked down.
-// Passwords that a seeded/admin-created Auth account may still be holding if it
-// drifted out of step with the app's own copy (e.g. the account was created
-// from the Employees tab, then the password was changed while Auth wasn't
-// ready). All of these are already public in this file — no new exposure.
-const LEGACY_AUTH_PASSWORDS = ['RCC@2026','Pass1234','RCC@admin2024'];
-
 async function _fbSignInSilently(u, p) {
-  if (!_fbAuth) return null;
-  const email = usernameToEmail(u);
-  const RETRY = ['auth/user-not-found','auth/invalid-credential','auth/invalid-login-credentials','auth/wrong-password'];
+  if (!_fbAuth) return;
   try {
-    return await _fbAuth.signInWithEmailAndPassword(email, p);
+    await _fbAuth.signInWithEmailAndPassword(usernameToEmail(u), p);
   } catch(err) {
-    const code = err && err.code;
-    if (RETRY.indexOf(code) === -1) { console.warn('Auth sign-in failed:', code); return null; }
-
-    // (a) The account may simply not exist yet — first login creates it.
-    try { return await _fbAuth.createUserWithEmailAndPassword(email, p); }
-    catch(e) {
-      if (e.code !== 'auth/email-already-in-use') { console.warn('Auth create failed:', u, e.code); return null; }
+    if (err.code === 'auth/user-not-found' || err.code === 'auth/invalid-credential') {
+      try { await _fbAuth.createUserWithEmailAndPassword(usernameToEmail(u), p); } catch(e) { /* silent */ }
     }
-
-    // (b) The account exists but its password no longer matches the app's.
-    //     Sign in with a known seed password, then realign Auth to the app
-    //     password so this heals itself instead of leaving the user unsynced.
-    const target = ((u || '') + '').trim().toLowerCase();
-    const d = DEFAULT_USERS.find(function(x){ return uname(x) === target; });
-    const candidates = [];
-    if (d && d.password) candidates.push(d.password);
-    LEGACY_AUTH_PASSWORDS.forEach(function(c){ if (candidates.indexOf(c) === -1) candidates.push(c); });
-    for (const c of candidates) {
-      if (c === p) continue;
-      try {
-        const cred = await _fbAuth.signInWithEmailAndPassword(email, c);
-        try { await cred.user.updatePassword(p); console.info('RCC-PMO: realigned Auth password for', u); }
-        catch(e2) { console.warn('Auth realign failed:', e2 && e2.code); }
-        return cred;
-      } catch(e3) { /* try the next candidate */ }
-    }
-    console.warn('RCC-PMO: Auth password for "' + u + '" is out of sync. Delete ' + email +
-                 ' under Firebase Console > Authentication > Users, then have them log in again.');
-    return null;
   }
-}
-
-// Start the DB sync only once Firebase Auth has a session. Secured rules require
-// auth != null, so firing reads before sign-in resolves => permission-denied
-// (why a clean/incognito session failed while a primed browser, holding a
-// persisted Auth token, appeared to work). Used by restore paths + fallback.
-function _startSyncWhenAuthReady(triesLeft) {
-  if (typeof triesLeft !== 'number') triesLeft = 40; // ~10s @ 250ms
-  if (_syncEnabled) return;
-  if (_fbAuth && _fbAuth.currentUser) { initFirebaseSync(); return; }
-  if (triesLeft <= 0) return; // give up quietly; onAuthStateChanged may still catch it
-  setTimeout(function(){ _startSyncWhenAuthReady(triesLeft - 1); }, 250);
 }
 
 // Merge passwords back into user records received from Firebase
@@ -3342,25 +3393,12 @@ function _startSyncWhenAuthReady(triesLeft) {
 function _mergeUserPasswords(remoteJson, localRaw) {
   try {
     const remote = JSON.parse(remoteJson);
-    if (!Array.isArray(remote)) return remoteJson;
     const local  = localRaw ? JSON.parse(localRaw) : DEFAULT_USERS;
-    const lById = {}, lByName = {};
-    (Array.isArray(local) ? local : []).forEach(function(l){ lById[l.id] = l; lByName[uname(l)] = l; });
-
-    // Password precedence: remote (now authoritative, since pushToFirebase no
-    // longer strips it) > local cache > DEFAULT_USERS seed. Previously local
-    // always won, which reverted password changes made on another device.
     const merged = remote.map(function(r) {
-      var out = Object.assign({}, r);
-      if (!out.password) {
-        var l = lById[r.id] || lByName[uname(r)];
-        if (l && l.password) out.password = l.password;
-      }
-      return out;
+      var l = local.find(function(x) { return x.id === r.id; });
+      return (l && l.password) ? Object.assign({}, r, { password: l.password }) : r;
     });
-    // _reconcileUsers unions in any seeded account the remote list is missing
-    // and repairs still-empty passwords from DEFAULT_USERS.
-    return JSON.stringify(_reconcileUsers(merged).users);
+    return JSON.stringify(merged);
   } catch(e) { return remoteJson; }
 }
 
@@ -3438,23 +3476,16 @@ function updateSyncStatus(msg) {
 
 function pushToFirebase(key, data) {
   // Store as { d: "<json string>" } — prevents Firebase array→object corruption.
-  // Passwords are NO LONGER stripped. Stripping them was the root cause of new
-  // staff being locked out: the remote list became the source of truth on
-  // bootstrap, so password-less remote records overwrote good local ones and
-  // nothing could authenticate. (Note: the seed passwords are already visible
-  // in this file to anyone who loads the page — moving user records to real
-  // Firebase Auth-only credentials is the proper long-term fix.)
+  // Passwords are stripped from user records before pushing — they stay local only.
   if (!_syncEnabled || !_fbDb) return;
   _isSyncing = true;
-  // Safety net: if the write callback never fires (offline//rules), don't leave
-  // _isSyncing pinned true — that would deafen the remote listener for good.
-  clearTimeout(pushToFirebase._t);
-  pushToFirebase._t = setTimeout(function(){ _isSyncing = false; }, 8000);
   try {
-    _fbDb.ref('pmo/' + key).set({ d: JSON.stringify(data) }, () => {
-      clearTimeout(pushToFirebase._t); _isSyncing = false;
-    });
-  } catch(e) { clearTimeout(pushToFirebase._t); _isSyncing = false; }
+    var payload = data;
+    if (key === STORAGE_KEYS.users && Array.isArray(data)) {
+      payload = data.map(function(u) { var r = Object.assign({}, u); delete r.password; return r; });
+    }
+    _fbDb.ref('pmo/' + key).set({ d: JSON.stringify(payload) }, () => { _isSyncing = false; });
+  } catch(e) { _isSyncing = false; }
 }
 
 function save(key, data) {
@@ -3571,9 +3602,6 @@ const DEFAULT_USERS = [
   { id:'u34', username:'emorales',    password:'RCC@2026',      name:'Eric P. Morales',                  role:'tech',        userType:'user',   email:'emorales@rcc.com.sa',       reportsTo:'u23', grade:7, title:'BMS & System Operator',                     division:'fm', projects:[], forceChange:true },
   { id:'u35', username:'nhamester',   password:'RCC@2026',      name:'Noman Hamester',                   role:'sup',         userType:'user',   email:'nhamester@rcc.com.sa',      reportsTo:'u23', grade:7, title:'Cleaning Supervisor',                       division:'fm', projects:[], forceChange:true },
   { id:'u36', username:'achacko',     password:'RCC@2026',      name:'Aby Chacko',                       role:'admin_coord', userType:'user',   email:'achacko@rcc.com.sa',        reportsTo:'u23', grade:7, title:'Secretary & Document Controller',           division:'fm', projects:[], forceChange:true },
-  // ── Re-seeded active staff (added via admin UI; baked in so they exist on every device) ──
-  { id:'u37', username:'ederaan',     password:'RCC@2026',      name:'Eyad AlDeraan',                    role:'site',        userType:'user',   email:'e.alderaan@alrugaibgroup.com', reportsTo:'u6',  grade:5, title:'Electrical Engineer',                       division:'pmo', projects:[], forceChange:true },
-  { id:'u38', username:'aghamdi',     password:'RCC@2026',      name:'Asem Al-Ghamdi',                   role:'site',        userType:'user',   email:'a.alghamdi@alrugaibgroup.com', reportsTo:'u3',  grade:5, title:'Urban Architect',                           division:'pmo', projects:[], forceChange:true },
 ];
 
 const DEFAULT_PROJECTS = [
@@ -3639,79 +3667,24 @@ const CRITICALITIES = ['Critical','High','Normal','Low'];
 const ROLES = { coo:'COO', pmo:'PMO Manager', tl:'Sr. Architect / PM Team Leader', pm:'Project Manager', eng:'Senior Engineer', site:'Site Engineer', sup:'Supervisor', draft:'Draftsman / Technician', cdo:'CDO', om:'Operations Manager', fm:'FM Division Manager', tech:'Technician / Operator', admin_coord:'Administrator / Coordinator' };
 const ROLE_CLASS = { coo:'role-coo', pmo:'role-pmo', tl:'role-tl', pm:'role-pm', eng:'role-eng', site:'role-tl', sup:'role-sup', draft:'role-draft', cdo:'role-coo', om:'role-pmo', fm:'role-pmo', tech:'role-draft', admin_coord:'role-draft' };
 
-// ═══════════════════════════════════════════════════════════════════════════
-// SEEDED-ACCOUNT RECONCILIATION  (fixes "new staff can't log in", for good)
-// ═══════════════════════════════════════════════════════════════════════════
-// Three separate faults used to combine to lock newly-added staff out:
-//   1. getUsers() only re-seeded when 'amadani' was missing, so any browser
-//      that had loaded an older build kept a stale pmo_users_v5 forever and
-//      never learned about staff baked in later.
-//   2. pushToFirebase() stripped `password` before writing, so the remote
-//      user list held records with NO password. On bootstrap "Firebase wins",
-//      and those password-less records overwrote the good local ones — after
-//      which no password could ever match.
-//   3. _mergeUserPasswords() only restored a password when the LOCAL copy
-//      already had one, so a device that never had the user got the empty
-//      remote record and stayed broken.
-// _reconcileUsers() is the single guard against all three: it runs on every
-// read and on every remote snapshot, guarantees every DEFAULT_USERS account
-// exists with a usable password, and back-fills blank fields without
-// clobbering deliberate admin edits.
-const USER_SEED_VERSION  = 3;
-const SEED_VERSION_KEY   = 'pmo_users_seed_version';
-// Usernames listed here get their credentials re-applied from DEFAULT_USERS the
-// first time a device sees the current USER_SEED_VERSION. To roll a seeded
-// password out to every device again: add the username and bump the version.
-const SEED_CREDENTIAL_RESET = ['ederaan','aghamdi'];
-const SEED_FIELDS = ['name','role','userType','email','reportsTo','grade','title','division'];
-
-function uname(u) { return (((u && u.username) || '') + '').trim().toLowerCase(); }
-
-function _reconcileUsers(list) {
-  var out = Array.isArray(list) ? list.map(function(u){ return Object.assign({}, u); }) : [];
-  var changed = false;
-
-  var seedVer = 0;
-  try { seedVer = parseInt(localStorage.getItem(SEED_VERSION_KEY), 10) || 0; } catch(e) {}
-  var resetCreds = seedVer < USER_SEED_VERSION;
-
-  var byId = {}, byName = {};
-  out.forEach(function(u){ byId[u.id] = u; byName[uname(u)] = u; });
-
-  DEFAULT_USERS.forEach(function(d){
-    var u = byId[d.id] || byName[uname(d)];
-    if (!u) { out.push(Object.assign({}, d)); changed = true; return; }
-
-    SEED_FIELDS.forEach(function(k){
-      if ((u[k] === undefined || u[k] === null || u[k] === '') && d[k] !== undefined && d[k] !== null) {
-        u[k] = d[k]; changed = true;
-      }
-    });
-    if (!Array.isArray(u.projects)) { u.projects = []; changed = true; }
-    // A record with no password can never authenticate — always repair it.
-    if (!u.password) { u.password = d.password; changed = true; }
-    if (resetCreds && SEED_CREDENTIAL_RESET.indexOf(uname(d)) !== -1) {
-      if (u.password !== d.password || u.forceChange !== d.forceChange) {
-        u.password = d.password; u.forceChange = d.forceChange; changed = true;
-      }
-    }
-  });
-
-  if (resetCreds) { try { localStorage.setItem(SEED_VERSION_KEY, String(USER_SEED_VERSION)); } catch(e) {} }
-  return { users: out, changed: changed };
-}
-
 function getUsers() {
   const stored = load(STORAGE_KEYS.users, null);
-  if (!stored || !Array.isArray(stored) || !stored.length) {
-    const seeded = _reconcileUsers(DEFAULT_USERS).users;
-    save(STORAGE_KEYS.users, seeded);
-    return seeded;
+  // If stored users don't have the real org (check by known id), reset to defaults
+  if (!stored || !stored.find(u => u.username === 'amadani')) {
+    save(STORAGE_KEYS.users, DEFAULT_USERS);
+    return DEFAULT_USERS;
   }
-  // Never trust a stored list blindly: union in missing seeded accounts and
-  // repair blank fields / missing passwords before anything reads it.
-  const r = _reconcileUsers(stored);
-  if (r.changed) { save(STORAGE_KEYS.users, r.users); return r.users; }
+  // Ensure existing stored users have division field from DEFAULT_USERS
+  const hasDiv = stored.some(u => u.division);
+  if (!hasDiv) {
+    // Merge divisions from DEFAULT_USERS
+    const merged = stored.map(u => {
+      const def = DEFAULT_USERS.find(d => d.id === u.id);
+      return def ? { ...u, division: def.division || u.division } : u;
+    });
+    save(STORAGE_KEYS.users, merged);
+    return merged;
+  }
   return stored;
 }
 function getTasks() { return load(STORAGE_KEYS.tasks, []); }
@@ -3891,12 +3864,10 @@ function toggleLoginPw() {
 }
 
 function doLogin() {
-  // Usernames are matched case- and whitespace-insensitively; "EDeraan " and
-  // "ederaan" are the same account.
-  const u = uname({ username: document.getElementById('loginUser').value });
+  const u = document.getElementById('loginUser').value.trim();
   const p = document.getElementById('loginPass').value;
   const users = getUsers();
-  const user = users.find(x => uname(x) === u && x.password === p);
+  const user = users.find(x => x.username === u && x.password === p);
   if (!user) { document.getElementById('loginErr').style.display = 'block'; return; }
   currentUser = user;
   save(STORAGE_KEYS.session, user.id);
@@ -3906,13 +3877,8 @@ function doLogin() {
   document.getElementById('app').classList.add('visible');
   if (user.forceChange) { showForceChangeModal(); }
   else { initApp(); }
-  // Sign in to Firebase Auth FIRST, then sync — otherwise a clean session
-  // (incognito / new device / new employee) fires permission-denied reads
-  // before auth resolves.
-  _fbSignInSilently(user.username, p).then(function(cred){
-    if (cred && cred.user) initFirebaseSync();
-    else _startSyncWhenAuthReady();
-  });
+  setTimeout(initFirebaseSync, 500);
+  _fbSignInSilently(u, p); // background — non-blocking
 }
 
 function doLogout() {
@@ -3946,16 +3912,11 @@ async function saveForceChange() {
   const err = document.getElementById('fpErr');
   if (np.length < 6) { err.textContent = 'Min 6 characters.'; err.style.display='block'; return; }
   if (np !== cp) { err.textContent = 'Passwords do not match.'; err.style.display='block'; return; }
-  // Update the Firebase Auth password too. If the silent sign-in hasn't
-  // resolved yet, sign in with the OLD password first — otherwise Auth keeps
-  // the old password while the app moves on, and every later login fails to
-  // authenticate (app password no longer matches Auth) and loses sync.
-  if (_fbAuth) {
-    try {
-      if (!_fbAuth.currentUser) await _fbSignInSilently(currentUser.username, currentUser.password);
-      if (_fbAuth.currentUser) await _fbAuth.currentUser.updatePassword(np);
-    } catch(e) { console.warn('Auth password update failed:', e && e.code); }
+  // Update Firebase Auth password if available (non-blocking on failure)
+  if (_fbAuth && _fbAuth.currentUser) {
+    try { await _fbAuth.currentUser.updatePassword(np); } catch(e) { /* silent — local update still proceeds */ }
   }
+  // Original logic — unchanged
   const users = getUsers();
   const idx = users.findIndex(x => x.id === currentUser.id);
   users[idx].password = np;
@@ -5738,12 +5699,9 @@ function addUser() {
   const email = document.getElementById('nuEmail').value.trim();
   const role = document.getElementById('nuRole').value;
   const pw = document.getElementById('nuPw').value;
-  // `division` used to be referenced here without ever being declared, which
-  // threw a ReferenceError and silently aborted the whole function.
-  const division = document.getElementById('nuDivision')?.value || 'pmo';
   if (!name || !username || !email || !pw) { toast('Fill all fields.', 'error'); return; }
   const users = getUsers();
-  if (users.find(u=>uname(u)===username)) { toast('Username already taken.', 'error'); return; }
+  if (users.find(u=>u.username===username)) { toast('Username already taken.', 'error'); return; }
   const newUser = { id:'u'+Date.now(), username, password:pw, name, role, email, userType:'user', division, projects:[], forceChange:true };
   users.push(newUser);
   saveUsers(users);
@@ -5910,7 +5868,7 @@ document.getElementById('loginPass').addEventListener('keydown', e => { if (e.ke
       document.getElementById('loginScreen').style.display = 'none';
       document.getElementById('app').classList.add('visible');
       initApp();
-      _startSyncWhenAuthReady(); // restore sync on page refresh (waits for Auth)
+      setTimeout(initFirebaseSync, 500); // restore sync on page refresh
     }
   }
 })();
@@ -6844,16 +6802,15 @@ function saveEmployee(uid) {
     users[idx].role      = role;
     users[idx].grade     = grade;
     users[idx].reportsTo = reports;
-    if (division) users[idx].division = division;   // was read but never stored
     if (pw) users[idx].password = pw;
     saveUsers(users);
     toast(`${name} updated.`, 'success');
   } else {
     // Add new
     if (!pw) { errEl.textContent='Initial password is required.'; errEl.style.display='block'; return; }
-    if (users.find(u => uname(u) === username)) { errEl.textContent='Username already taken.'; errEl.style.display='block'; return; }
+    if (users.find(u => u.username === username)) { errEl.textContent='Username already taken.'; errEl.style.display='block'; return; }
     const newId = 'u' + Date.now();
-    users.push({ id:newId, username, password:pw, name, role, email, title, grade, reportsTo:reports, division:(division||'pmo'), userType:'user', projects:[], forceChange:true });
+    users.push({ id:newId, username, password:pw, name, role, email, title, grade, reportsTo:reports, userType:'user', projects:[], forceChange:true });
     saveUsers(users);
     // Silently create Firebase Auth account (non-blocking)
     if (_fbAuth) _fbAuth.createUserWithEmailAndPassword(usernameToEmail(username), pw).catch(e => {
@@ -7725,11 +7682,19 @@ function openDailyLogForEmployee(uid) {
   showView('dailyLog');
 }
 
+// Local calendar date as YYYY-MM-DD. toISOString() must never be used for this:
+// it converts to UTC, so in Riyadh (UTC+3) it returns yesterday's date.
+function dlLocalYMD(d) {
+  return d.getFullYear() + '-' +
+         String(d.getMonth() + 1).padStart(2, '0') + '-' +
+         String(d.getDate()).padStart(2, '0');
+}
+
 function renderDailyLog(targetUid, targetDate) {
   const el = document.getElementById('viewDailyLog');
   if (!el) return;
 
-  const today = new Date().toISOString().slice(0,10);
+  const today = dlLocalYMD(new Date());
   const uid   = targetUid  || window._dlState.uid  || currentUser.id;
   const date  = targetDate || window._dlState.date  || today;
   window._dlState = { uid, date };
@@ -7925,12 +7890,18 @@ function buildAllDailyLogRows(userTasks, projects, uid, date, canEdit, loggedTas
 function buildDailyLogRow(rowNum, task, allUserTasks, projects, uid, date, canEdit, isLogged) {
   const tid       = task ? task.id : '';
   const p         = task ? projects.find(x => x.id === task.project) : null;
-  const projNum   = p ? (projects.findIndex(x => x.id === task.project) + 1) : '';
+  const projNum   = p ? (p.no || p.number || (projects.findIndex(x => x.id === task.project) + 1)) : '';
   const projCode  = p ? p.code : '';
   const projName  = p ? p.name : '';
-  const existLog  = task ? (task.timeLogs||[]).find(l => l.userId === uid && l.date === date) : null;
-  const logHours  = existLog ? existLog.hours : '';
+  const dayLogs   = task ? (task.timeLogs||[]).filter(l => l.userId === uid && l.date === date) : [];
+  const existLog  = dayLogs.length ? dayLogs[0] : null;
+  // Sum rather than take the first — if legacy duplicate entries exist for this
+  // day they show as a correct total instead of an arbitrary single value.
+  const logHours  = dayLogs.length ? Math.round(dayLogs.reduce((s,l)=>s+(Number(l.hours)||0),0)*100)/100 : '';
   const logNote   = existLog ? (existLog.note||'') : '';
+  // Per-day description / expected end date, falling back to the task record.
+  const rowDesc   = (existLog && existLog.desc) ? existLog.desc : (task ? (task.description||'') : '');
+  const rowDue    = (existLog && existLog.due)  ? existLog.due  : (task ? (task.dueDate||'')     : '');
   const progress  = (task && task.progress !== undefined && task.progress !== null) ? task.progress : '';
   const status    = task ? (task.status||'Backlog') : '';
   const hasHours  = logHours !== '' && Number(logHours) > 0;
@@ -7962,8 +7933,8 @@ function buildDailyLogRow(rowNum, task, allUserTasks, projects, uid, date, canEd
       <td class="dl-readonly-cell">${escHtml(projName)}</td>
       <td class="dl-readonly-cell" style="text-align:center;font-family:var(--mono);font-size:11px;">${projNum}</td>
       <td style="text-align:center;"><span class="dl-proj-code">${escHtml(projCode)}</span></td>
-      <td class="dl-readonly-cell">${escHtml(task.description||'')}</td>
-      <td class="dl-readonly-cell" style="text-align:center;font-family:var(--mono);font-size:11px;">${task.dueDate||'—'}</td>
+      <td class="dl-readonly-cell">${escHtml(rowDesc)}</td>
+      <td class="dl-readonly-cell" style="text-align:center;font-family:var(--mono);font-size:11px;">${rowDue||'—'}</td>
       <td style="text-align:center;font-family:var(--mono);font-weight:700;color:var(--accent);">${logHours||'—'}</td>
       <td>
         <div style="text-align:center;font-weight:700;color:var(--green);">${progress !== '' ? progress+'%' : '—'}</div>
@@ -8013,21 +7984,21 @@ function buildDailyLogRow(rowNum, task, allUserTasks, projects, uid, date, canEd
     <!-- Brief Description -->
     <td>
       <input type="text" class="dl-input" id="dldesc_${tid||'b'+rowNum}" data-taskid="${tid}" data-field="desc"
-        value="${escHtml(task ? (task.description||'') : '')}"
+        value="${escHtml(rowDesc)}"
         placeholder="Brief description…">
     </td>
 
     <!-- Expected End Date -->
     <td>
       <input type="date" class="dl-input" id="dldue_${tid||'b'+rowNum}" data-taskid="${tid}" data-field="dueDate"
-        value="${task ? (task.dueDate||'') : ''}"
+        value="${rowDue}"
         style="font-family:var(--mono);font-size:11px;">
     </td>
 
     <!-- Hours (this day) -->
     <td>
       <input type="number" class="dl-input-num" id="dlh_${tid||'b'+rowNum}" data-taskid="${tid}" data-field="hours"
-        value="${logHours}" min="0" max="24" step="1" placeholder="0"
+        value="${logHours}" min="0" max="24" step="0.25" placeholder="0"
         oninput="dlOnHoursInput(this);dlUpdateSummary();"
         style="${hasHours?'color:var(--accent);border-color:rgba(192,57,43,0.4);':''}">
     </td>
@@ -8140,12 +8111,15 @@ function dlOnTaskSelect(sel, uid, date) {
 
   const projects = getProjects();
   const p        = projects.find(x => x.id === task.project);
-  const projNum  = p ? (projects.findIndex(x => x.id === task.project) + 1) : '';
+  const projNum  = p ? (p.no || p.number || (projects.findIndex(x => x.id === task.project) + 1)) : '';
   const projCode = p ? p.code : '';
   const projName = p ? p.name : '';
-  const existLog = (task.timeLogs||[]).find(l => l.userId === uid && l.date === date);
-  const logHours = existLog ? existLog.hours : '';
+  const dayLogs  = (task.timeLogs||[]).filter(l => l.userId === uid && l.date === date);
+  const existLog = dayLogs.length ? dayLogs[0] : null;
+  const logHours = dayLogs.length ? Math.round(dayLogs.reduce((s,l)=>s+(Number(l.hours)||0),0)*100)/100 : '';
   const logNote  = existLog ? (existLog.note||'') : '';
+  const rowDesc  = (existLog && existLog.desc) ? existLog.desc : (task.description||'');
+  const rowDue   = (existLog && existLog.due)  ? existLog.due  : (task.dueDate||'');
   const progress = (task.progress !== undefined && task.progress !== null) ? task.progress : '';
   const status   = task.status || 'Backlog';
 
@@ -8183,11 +8157,11 @@ function dlOnTaskSelect(sel, uid, date) {
 
   // Description
   const descEl = document.getElementById('dldesc_' + suffix);
-  if (descEl) { descEl.value = task.description||''; descEl.dataset.taskid = tid; }
+  if (descEl) { descEl.value = rowDesc; descEl.dataset.taskid = tid; }
 
   // Due date
   const dueEl = document.getElementById('dldue_' + suffix);
-  if (dueEl) { dueEl.value = task.dueDate||''; dueEl.dataset.taskid = tid; }
+  if (dueEl) { dueEl.value = rowDue; dueEl.dataset.taskid = tid; }
 
   // Hours (existing log entry)
   const hEl = document.getElementById('dlh_' + suffix);
@@ -8279,12 +8253,12 @@ function dlUpdateSummary() {
 // ─────────────────────────────────────────────────────────
 function dlGoDate(offset) {
   const dlDateEl = document.getElementById('dlDate');
-  const curDate  = dlDateEl ? dlDateEl.value : (window._dlState.date || new Date().toISOString().slice(0,10));
+  const curDate  = dlDateEl ? dlDateEl.value : (window._dlState.date || dlLocalYMD(new Date()));
   const d = new Date(curDate + 'T00:00:00');
   if (offset === 0) { const t = new Date(); d.setFullYear(t.getFullYear(),t.getMonth(),t.getDate()); }
   else d.setDate(d.getDate() + offset);
   const uid     = window._dlState.uid || currentUser.id;
-  const newDate = d.toISOString().slice(0,10);
+  const newDate = dlLocalYMD(d);
   window._dlState.date = newDate;
   renderDailyLog(uid, newDate);
 }
@@ -8383,7 +8357,14 @@ function saveDailyLog(uid, date) {
     // Time log
     const existIdx = (tasks[idx].timeLogs||[]).findIndex(l => l.userId === uid && l.date === date);
     if (hours > 0) {
-      const entry = { userId: uid, date, hours, note };
+      // Collapse any legacy duplicate rows for this user+date down to one entry
+      const dupes = (tasks[idx].timeLogs||[]).filter(l => l.userId === uid && l.date === date);
+      if (dupes.length > 1) {
+        tasks[idx].timeLogs = tasks[idx].timeLogs.filter(l => !(l.userId === uid && l.date === date));
+        changed = true; changeLog.push('merged ' + dupes.length + ' duplicate entries');
+      }
+      const entry = { userId: uid, date, hours, note,
+                      desc: (desc !== null ? desc : ''), due: (dueDate !== null ? dueDate : '') };
       if (existIdx >= 0) {
         if (tasks[idx].timeLogs[existIdx].hours !== hours || tasks[idx].timeLogs[existIdx].note !== note) {
           tasks[idx].timeLogs[existIdx] = entry; changed = true;
@@ -8466,12 +8447,15 @@ async function exportDailyLogExcel(uid, date) {
 
   allRows.forEach((t, i) => {
     const p = projects.find(x => x.id === t.project);
-    const log = (t.timeLogs||[]).find(l => l.userId === uid && l.date === date);
+    const dayLogs = (t.timeLogs||[]).filter(l => l.userId === uid && l.date === date);
+    const log     = dayLogs.length ? dayLogs[0] : null;
+    const dayHrs  = Math.round(dayLogs.reduce((a,l)=>a+(Number(l.hours)||0),0)*100)/100;
     rows.push([
       i + 1, t.title,
-      p ? p.name : '', p ? (projects.indexOf(p)+1) : '', p ? p.code : '',
-      t.description||'', t.dueDate||'',
-      log ? log.hours : 0,
+      p ? p.name : '', p ? (p.no || p.number || (projects.indexOf(p)+1)) : '', p ? p.code : '',
+      (log && log.desc) ? log.desc : (t.description||''),
+      (log && log.due)  ? log.due  : (t.dueDate||''),
+      dayHrs,
       (t.progress !== undefined && t.progress !== null) ? t.progress : '',
       log ? (log.note||'') : ''
     ]);
