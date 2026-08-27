@@ -991,6 +991,249 @@ function renderEmployee() {
     </div>`;
 }
 
+// ═══════════════════════════════════════════════════════════
+// IMPORT HEALTH SCAN
+// Finds the fingerprint of the old importer bug so you only
+// re-upload the months that are actually broken:
+//   · a single day-entry above 24h  (impossible in one day)
+//   · more than one entry for the same task on the same day
+//   · a day whose total across all tasks is above 24h
+// ═══════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════
+// CLEAR LOGGED HOURS — surgical reset before a re-import
+// Removes time entries only. Tasks, descriptions, progress,
+// status and history all stay. Scope it to one employee and
+// one month, or widen it to all.
+// ═══════════════════════════════════════════════════════════
+function _clearHoursScan(uid, month) {
+  const hit = l => l && l.date &&
+    (uid === '__all__' || l.userId === uid) &&
+    (month === '__all__' || String(l.date).slice(0, 7) === month);
+  let entries = 0, hours = 0, tasks = 0, emptied = 0;
+  getTasks().forEach(t => {
+    const logs = t.timeLogs || [];
+    const gone = logs.filter(hit);
+    if (!gone.length) return;
+    tasks++;
+    entries += gone.length;
+    hours   += gone.reduce((s, l) => s + (Number(l.hours) || 0), 0);
+    if (gone.length === logs.length) emptied++;
+  });
+  return { entries, hours: Math.round(hours * 10) / 10, tasks, emptied };
+}
+
+function showClearHoursPanel() {
+  const users  = getUsers().filter(u => u.id !== 'u0');
+  const tasks  = getTasks();
+  const uids   = new Set(), months = new Set();
+  tasks.forEach(t => (t.timeLogs || []).forEach(l => {
+    if (!l || !l.date) return;
+    uids.add(l.userId);
+    months.add(String(l.date).slice(0, 7));
+  }));
+  const MON = ['January','February','March','April','May','June',
+               'July','August','September','October','November','December'];
+  const label = m => MON[parseInt(m.slice(5), 10) - 1] + ' ' + m.slice(0, 4);
+  const withHours = users.filter(u => uids.has(u.id));
+
+  document.getElementById('taskModalContent').innerHTML = `
+    <div class="modal-header">
+      <div class="modal-title">🧹 Clear Logged Hours</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <p style="font-size:13px;color:var(--text2);margin-bottom:16px;line-height:1.7;">
+        Deletes <b>time entries only</b>. The tasks themselves, their descriptions, progress,
+        status and history are kept — so a re-import rebuilds the hours onto the same tasks.
+        Use this when you want a month to contain <i>exactly</i> what the Excel says.
+      </p>
+      <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:14px;">
+        <div style="flex:1;min-width:190px;">
+          <label style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:.07em;">Employee</label>
+          <select id="chUser" onchange="_chRefresh()" style="width:100%;margin-top:5px;background:var(--bg3);border:1px solid var(--border2);color:var(--text);border-radius:var(--radius);padding:7px 10px;font-family:var(--font);font-size:13px;">
+            ${withHours.map(u => `<option value="${u.id}">${escHtml(u.name)}</option>`).join('')}
+            <option value="__all__">⚠ All employees</option>
+          </select>
+        </div>
+        <div style="flex:1;min-width:150px;">
+          <label style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:.07em;">Month</label>
+          <select id="chMonth" onchange="_chRefresh()" style="width:100%;margin-top:5px;background:var(--bg3);border:1px solid var(--border2);color:var(--text);border-radius:var(--radius);padding:7px 10px;font-family:var(--font);font-size:13px;">
+            ${[...months].sort().reverse().map(m => `<option value="${m}">${label(m)}</option>`).join('')}
+            <option value="__all__">⚠ All months</option>
+          </select>
+        </div>
+      </div>
+      <div id="chPreview" style="padding:12px 16px;border-radius:10px;font-size:13px;line-height:1.8;"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" id="chGo" onclick="_chConfirm()" style="background:#C0392B;border-color:#C0392B;">Clear these hours</button>
+    </div>`;
+  document.getElementById('taskModal').classList.add('open');
+  _chRefresh();
+}
+
+function _chRefresh() {
+  const uid = document.getElementById('chUser')?.value;
+  const mon = document.getElementById('chMonth')?.value;
+  const el  = document.getElementById('chPreview');
+  const go  = document.getElementById('chGo');
+  if (!el) return;
+  const r = _clearHoursScan(uid, mon);
+  const wide = (uid === '__all__' || mon === '__all__');
+  if (r.entries === 0) {
+    el.style.background = 'rgba(0,0,0,0.04)';
+    el.innerHTML = 'Nothing logged for that selection — nothing to clear.';
+    if (go) { go.disabled = true; go.style.opacity = '.45'; }
+    return;
+  }
+  el.style.background = wide ? 'rgba(192,57,43,0.10)' : 'rgba(192,57,43,0.06)';
+  el.innerHTML = `
+    Will delete <b>${r.entries}</b> time entr${r.entries === 1 ? 'y' : 'ies'}
+    totalling <b>${r.hours}h</b>, across <b>${r.tasks}</b> task(s).
+    ${r.emptied ? `<div style="color:var(--text2);font-size:12px;">${r.emptied} task(s) will be left with no hours (the tasks stay).</div>` : ''}
+    ${wide ? `<div style="color:#C0392B;font-weight:600;margin-top:6px;">⚠ Wide scope — re-import the matching sheets straight after.</div>` : ''}`;
+  if (go) { go.disabled = false; go.style.opacity = '1'; }
+}
+
+function _chConfirm() {
+  const uid = document.getElementById('chUser')?.value;
+  const mon = document.getElementById('chMonth')?.value;
+  if (!uid || !mon) return;
+  const r = _clearHoursScan(uid, mon);
+  if (!r.entries) return;
+  const who   = uid === '__all__' ? 'ALL employees' : (getUsers().find(u => u.id === uid) || {}).name;
+  const when  = mon === '__all__' ? 'ALL months' : mon;
+  if (!confirm('Delete ' + r.entries + ' time entries (' + r.hours + 'h) for ' + who + ' — ' + when + '?\n\nTasks are kept. This cannot be undone.')) return;
+
+  const hit = l => l && l.date &&
+    (uid === '__all__' || l.userId === uid) &&
+    (mon === '__all__' || String(l.date).slice(0, 7) === mon);
+
+  const tasks = getTasks();
+  let cleared = 0;
+  tasks.forEach(t => {
+    const logs = t.timeLogs || [];
+    if (!logs.length) return;
+    const gone = logs.filter(hit);
+    if (!gone.length) return;
+    t.timeLogs = logs.filter(l => !hit(l));
+    cleared += gone.length;
+    t.updates = [...(t.updates || []), {
+      userId: currentUser.id,
+      text: 'Logged hours cleared (' + when + ') — ' + gone.length + ' entr' +
+            (gone.length === 1 ? 'y' : 'ies') + ', ' +
+            Math.round(gone.reduce((s, l) => s + (Number(l.hours) || 0), 0) * 10) / 10 + 'h',
+      ts: Date.now(), type: 'system'
+    }];
+  });
+  saveTasks(tasks);
+  closeModal();
+  toast('Cleared ' + cleared + ' time entr' + (cleared === 1 ? 'y' : 'ies') + ' — now re-import the sheet(s).', 'success');
+  try { if (typeof renderCurrentView === 'function') renderCurrentView(); } catch(e){}
+}
+
+function scanImportHealth() {
+  const users = getUsers().filter(u => u.id !== 'u0');
+  const nameOf = id => (users.find(u => u.id === id) || {}).name || id;
+  const groups = {};   // "uid|YYYY-MM" → findings
+
+  getTasks().forEach(t => {
+    (t.timeLogs || []).forEach(l => {
+      if (!l || !l.date || !l.userId) return;
+      const key = l.userId + '|' + String(l.date).slice(0, 7);
+      const g = groups[key] || (groups[key] = {
+        uid: l.userId, month: String(l.date).slice(0, 7),
+        over24: 0, dupes: 0, maxDay: 0, entries: 0, total: 0,
+        byDay: {}, byTaskDay: {}
+      });
+      const h = Number(l.hours) || 0;
+      g.entries++;
+      g.total += h;
+      if (h > 24) g.over24++;
+      const dk = t.id + '|' + l.date;
+      g.byTaskDay[dk] = (g.byTaskDay[dk] || 0) + 1;
+      g.byDay[l.date] = (g.byDay[l.date] || 0) + h;
+    });
+  });
+
+  const rows = Object.values(groups).map(g => {
+    g.dupes  = Object.values(g.byTaskDay).filter(n => n > 1).length;
+    g.maxDay = Math.max(0, ...Object.values(g.byDay));
+    g.bad    = g.over24 > 0 || g.dupes > 0 || g.maxDay > 24;
+    g.name   = nameOf(g.uid);
+    return g;
+  }).sort((a, b) => (b.month.localeCompare(a.month) || a.name.localeCompare(b.name)));
+
+  const bad     = rows.filter(r => r.bad);
+  const months  = [...new Set(bad.map(r => r.month))].sort();
+  const round1  = n => Math.round(n * 10) / 10;
+  const MON     = ['January','February','March','April','May','June',
+                   'July','August','September','October','November','December'];
+  const label   = m => MON[parseInt(m.slice(5), 10) - 1] + ' ' + m.slice(0, 4);
+
+  const tr = r => `
+    <tr style="border-bottom:1px solid var(--border);${r.bad ? 'background:rgba(192,57,43,0.06);' : ''}">
+      <td style="padding:5px 8px;font-family:var(--mono);font-size:11px;">${r.month}</td>
+      <td style="padding:5px 8px;">${escHtml(r.name)}</td>
+      <td style="padding:5px 8px;text-align:center;font-family:var(--mono);">${r.entries}</td>
+      <td style="padding:5px 8px;text-align:center;font-family:var(--mono);">${round1(r.total)}h</td>
+      <td style="padding:5px 8px;text-align:center;font-family:var(--mono);color:${r.maxDay > 24 ? 'var(--red)' : 'var(--text3)'};">${round1(r.maxDay)}h</td>
+      <td style="padding:5px 8px;text-align:center;font-family:var(--mono);color:${r.over24 ? 'var(--red)' : 'var(--text3)'};">${r.over24 || '—'}</td>
+      <td style="padding:5px 8px;text-align:center;font-family:var(--mono);color:${r.dupes ? 'var(--red)' : 'var(--text3)'};">${r.dupes || '—'}</td>
+      <td style="padding:5px 8px;text-align:center;">${r.bad
+        ? '<span style="color:var(--red);font-weight:600;">re-import</span>'
+        : '<span style="color:var(--green);">ok</span>'}</td>
+    </tr>`;
+
+  document.getElementById('taskModalContent').innerHTML = `
+    <div class="modal-header">
+      <div class="modal-title">🩺 Import Health Scan</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      ${bad.length === 0 ? `
+        <div style="padding:14px 18px;background:rgba(39,174,96,0.09);border-radius:10px;font-size:13px;margin-bottom:14px;">
+          ✅ No inflated or duplicated hours found. Nothing needs re-importing.
+        </div>` : `
+        <div style="padding:14px 18px;background:rgba(192,57,43,0.08);border-radius:10px;font-size:13px;margin-bottom:14px;line-height:1.7;">
+          <b>${bad.length}</b> employee-month${bad.length === 1 ? '' : 's'} need re-importing, across
+          <b>${months.length}</b> month${months.length === 1 ? '' : 's'}:
+          <div style="margin-top:8px;font-weight:600;">${months.map(label).join(' · ')}</div>
+          <div style="margin-top:10px;color:var(--text2);font-weight:400;">
+            Select every log-sheet file for those months — all employees together, one selection —
+            and run <b>Import &amp; Sync</b>. Each file rewrites only the days it contains.
+          </div>
+        </div>`}
+      <div style="overflow:auto;max-height:52vh;">
+        <table style="width:100%;border-collapse:collapse;font-size:12px;">
+          <thead><tr style="border-bottom:2px solid var(--border2);text-align:left;">
+            <th style="padding:5px 8px;">Month</th>
+            <th style="padding:5px 8px;">Employee</th>
+            <th style="padding:5px 8px;text-align:center;">Entries</th>
+            <th style="padding:5px 8px;text-align:center;">Total</th>
+            <th style="padding:5px 8px;text-align:center;">Worst&nbsp;day</th>
+            <th style="padding:5px 8px;text-align:center;">&gt;24h</th>
+            <th style="padding:5px 8px;text-align:center;">Dupes</th>
+            <th style="padding:5px 8px;text-align:center;">Status</th>
+          </tr></thead>
+          <tbody>${rows.map(tr).join('') || '<tr><td colspan="8" style="padding:20px;text-align:center;color:var(--text3);">No time entries recorded yet.</td></tr>'}</tbody>
+        </table>
+      </div>
+      <div style="margin-top:12px;font-size:11px;color:var(--text3);line-height:1.7;">
+        A day above 24h, or two entries for one task on one day, points to either the old
+        importer stacking month-to-date totals or a typo in the sheet. Either way, re-importing
+        that month clears those days and rewrites them from the Excel. Months marked
+        <b>ok</b> have no impossible values &mdash; leave them alone.
+      </div>
+    </div>
+    <div class="modal-footer">
+      ${bad.length ? `<button class="btn btn-primary" onclick="closeModal();triggerBatchImport('accumulate')">📥 Re-import now</button>` : ''}
+      <button class="btn btn-ghost" onclick="closeModal()">Close</button>
+    </div>`;
+  document.getElementById('taskModal').classList.add('open');
+}
+
 function showBatchImportPanel() {
   document.getElementById('taskModalContent').innerHTML = `
     <div class="modal-header">
@@ -1010,16 +1253,34 @@ function showBatchImportPanel() {
         ✔ Ignores empty rows and unfilled hours cells
       </div>
       <div style="display:flex;gap:10px;flex-wrap:wrap;">
-        <button class="btn btn-primary" onclick="closeModal();triggerBatchImport('accumulate')">
-          📥 Import &amp; Sync (Add / Accumulate)
+        <button class="btn btn-primary" onclick="closeModal();triggerBatchImport('accumulate', true)">
+          📁 Import a whole folder (all months)
+        </button>
+        <button class="btn btn-ghost" onclick="closeModal();triggerBatchImport('accumulate')">
+          📥 Pick individual files
+        </button>
+        <button class="btn btn-ghost" onclick="scanImportHealth()">
+          🩺 Check which months need re-importing
+        </button>
+        <button class="btn btn-ghost" onclick="showClearHoursPanel()" style="border:1px solid rgba(192,57,43,0.35);">
+          🧹 Clear logged hours…
         </button>
         <button class="btn btn-ghost" onclick="closeModal();triggerBatchImport('replace')" style="border:1px solid rgba(192,57,43,0.4);">
           🔄 Replace All Tasks per Employee
         </button>
       </div>
       <div style="margin-top:12px;font-size:11px;color:var(--text3);">
-        <b>Import &amp; Sync</b> adds new tasks and accumulates hours on existing matching tasks.<br>
-        <b>Replace</b> removes all tasks for each matched employee first, then re-imports.
+        <b>Import a whole folder</b> — pick one parent folder and it walks every sub-folder inside it,
+        so month folders are all taken in a single selection. Non-Excel files are ignored.<br>
+        Both import buttons use <b>Add / Accumulate</b>: each file is authoritative for the days it contains:
+        those days are rewritten from the sheet, so uploading the same file twice changes nothing.
+        Other months and days not in the file are left alone. You can select every employee and
+        every month in a single go.<br>
+        <b>Replace</b> — deletes <i>all</i> tasks for each matched employee first, including ones not
+        in the sheet. Rarely what you want.<br>
+        <b>Clear logged hours</b> — wipes only the time entries for one employee/month and keeps the
+        tasks. You normally don't need this: a re-import already rewrites the days it covers. Reach for
+        it if a month still looks wrong afterwards.
       </div>
     </div>`;
   document.getElementById('taskModal').classList.add('open');
@@ -1297,7 +1558,21 @@ function applyParsedTasks(parsed, uid, importMode) {
   if (extracted.length === 0) return { added:0, updated:0, removed:0, skipped:0, cleared:0, entries:0, days:0 };
 
   let tasks = getTasks();
-  let added = 0, updated = 0, removed = 0, skipped = 0, cleared = 0, entries = 0;
+  let added = 0, updated = 0, removed = 0, skipped = 0, cleared = 0, entries = 0, unchanged = 0;
+
+  // Fingerprint each task's state BEFORE any mutation. After writing we compare
+  // against it, so re-uploading an unchanged sheet writes no history entry at
+  // all — the activity log only records real changes.
+  const sigOf = t => JSON.stringify({
+    logs: (t.timeLogs || [])
+            .filter(l => l.userId === uid && coveredDates.has(l.date))
+            .map(l => [l.date, l.hours, l.note || '', l.desc || '', l.due || ''])
+            .sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
+    due:  t.dueDate     || '',
+    desc: t.description || '',
+    prog: (t.progress === undefined || t.progress === null) ? null : t.progress
+  });
+  const sigBefore = new Map(tasks.map(t => [t.id, sigOf(t)]));
 
   if (importMode === 'replace') {
     removed = tasks.filter(t => t.assignedTo === uid).length;
@@ -1365,13 +1640,6 @@ function applyParsedTasks(parsed, uid, importMode) {
       if (lastDue)  t.dueDate     = lastDue;
       if (lastDesc) t.description = lastDesc;
       if (lastProg !== null) t.progress = lastProg;
-      t.updates = [...(t.updates || []), {
-        userId: currentUser.id,
-        text: 'Timesheet import · ' + logEntries.length + ' day(s), ' +
-              round2(logEntries.reduce((s, l) => s + l.hours, 0)) + 'h',
-        ts: Date.now(), type: 'system'
-      }];
-      updated++;
     } else if (existing < 0) {
       const newId = 'T' + String(Date.now()).slice(-6) + String(Math.floor(Math.random() * 1000)).padStart(3, '0');
       tasks.push({
@@ -1394,8 +1662,26 @@ function applyParsedTasks(parsed, uid, importMode) {
     }
   });
 
+  // One history line per task that actually changed. A task whose figures are
+  // identical to what was already stored is left completely untouched.
+  if (importMode === 'accumulate' && coveredDates.size) {
+    tasks.forEach(t => {
+      const before = sigBefore.get(t.id);
+      if (before === undefined) return;              // newly created — already logged
+      if (before === sigOf(t)) { unchanged++; return; }
+      const dayHrs = (t.timeLogs || []).filter(l => l.userId === uid && coveredDates.has(l.date));
+      t.updates = [...(t.updates || []), {
+        userId: currentUser.id,
+        text: 'Timesheet import · ' + dayHrs.length + ' day(s), ' +
+              round2(dayHrs.reduce((s, l) => s + (l.hours || 0), 0)) + 'h',
+        ts: Date.now(), type: 'system'
+      }];
+      updated++;
+    });
+  }
+
   saveTasks(tasks);
-  return { added, updated, removed, skipped, cleared, entries, days: coveredDates.size };
+  return { added, updated, removed, skipped, cleared, entries, unchanged, days: coveredDates.size };
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -1445,10 +1731,19 @@ async function handleEmployeeExcel(input, uid) {
 // ═══════════════════════════════════════════════════════════
 // BATCH IMPORT — multiple employees at once (admin only)
 // ═══════════════════════════════════════════════════════════
-function triggerBatchImport(mode) {
+function triggerBatchImport(mode, folder) {
   const inp = document.getElementById('batchImportInput');
   if (!inp) return;
   inp.dataset.importMode = mode || 'accumulate';
+  // Folder mode walks the picked directory AND its sub-directories, so month
+  // folders spread across a parent folder can all be taken in one selection.
+  if (folder) {
+    inp.setAttribute('webkitdirectory', '');
+    inp.setAttribute('directory', '');
+  } else {
+    inp.removeAttribute('webkitdirectory');
+    inp.removeAttribute('directory');
+  }
   inp.click();
 }
 
@@ -1481,12 +1776,24 @@ function matchUserByName(detectedName, users) {
 }
 
 async function handleBatchImport(input) {
-  const files = Array.from(input.files);
-  if (!files.length) return;
+  let files = Array.from(input.files);
   input.value = '';
+  input.removeAttribute('webkitdirectory');
+  input.removeAttribute('directory');
   const importMode = input.dataset.importMode || 'accumulate';
 
-  toast('Loading ' + files.length + ' file(s)…', 'info');
+  // A folder selection brings along everything in it, so keep only real
+  // workbooks: no temp lock files (~$…), no hidden files, no other formats.
+  const nonExcel = files.length;
+  files = files.filter(f => /\.xls[xm]?$/i.test(f.name) && !/^[~.]/.test(f.name))
+               .sort((a, b) => (a.webkitRelativePath || a.name).localeCompare(b.webkitRelativePath || b.name));
+  const ignored = nonExcel - files.length;
+
+  if (!files.length) {
+    toast(ignored ? 'No Excel files found in that folder.' : 'No files selected.', 'error');
+    return;
+  }
+
   try {
     await ensureXLSX();
   } catch(e) {
@@ -1497,6 +1804,27 @@ async function handleBatchImport(input) {
   const allUsers    = getUsers().filter(u => u.id !== 'u0');
   const results     = [];
   const unmatched   = [];
+  const notLogSheet = [];
+
+  // Progress panel — a folder import can be dozens of files
+  document.getElementById('taskModalContent').innerHTML = `
+    <div class="modal-header"><div class="modal-title">📥 Importing…</div></div>
+    <div class="modal-body">
+      <div id="biProgressText" style="font-size:13px;margin-bottom:10px;">Preparing ${files.length} file(s)…</div>
+      <div style="height:8px;background:var(--bg3);border-radius:4px;overflow:hidden;">
+        <div id="biProgressBar" style="height:100%;width:0%;background:#C0392B;transition:width .15s;"></div>
+      </div>
+      <div id="biProgressFile" style="font-size:11px;color:var(--text3);margin-top:8px;min-height:15px;"></div>
+    </div>`;
+  document.getElementById('taskModal').classList.add('open');
+  const setProgress = (i, name) => {
+    const t = document.getElementById('biProgressText');
+    const b = document.getElementById('biProgressBar');
+    const f = document.getElementById('biProgressFile');
+    if (t) t.textContent = 'Processing ' + i + ' of ' + files.length + ' file(s)…';
+    if (b) b.style.width = Math.round((i / files.length) * 100) + '%';
+    if (f) f.textContent = name || '';
+  };
 
   async function processFile(file) {
     return new Promise((resolve) => {
@@ -1516,10 +1844,15 @@ async function handleBatchImport(input) {
 
           const { added, updated, removed, entries, days, cleared } = applyParsedTasks(parsed, matchedUser.id, importMode);
           if (parsed.warnings && parsed.warnings.length) console.warn(file.name + ' warnings:', parsed.warnings);
-          results.push({ name: matchedUser.name, fileName: file.name, added, updated, removed, entries, days, cleared });
+          results.push({ name: matchedUser.name, fileName: file.webkitRelativePath || file.name,
+                         added, updated, removed, entries, days, cleared });
           resolve(matchedUser);
         } catch(err) {
-          unmatched.push({ fileName: file.name, detectedName: '(parse error: ' + err.message + ')' });
+          if (/No daily-log sheets/.test(err.message || '')) {
+            notLogSheet.push(file.webkitRelativePath || file.name);
+          } else {
+            unmatched.push({ fileName: file.name, detectedName: '(parse error: ' + err.message + ')' });
+          }
           resolve(null);
         }
       };
@@ -1527,9 +1860,17 @@ async function handleBatchImport(input) {
     });
   }
 
-  // Process all files sequentially to avoid localStorage race conditions
-  for (const file of files) {
-    await processFile(file);
+  // Process sequentially (avoids localStorage races), holding the Firebase
+  // push until the very end so the whole batch lands as one write.
+  beginDeferredSync();
+  try {
+    let i = 0;
+    for (const file of files) {
+      setProgress(++i, file.webkitRelativePath || file.name);
+      await processFile(file);
+    }
+  } finally {
+    endDeferredSync();
   }
 
   // Show summary modal
@@ -1550,6 +1891,8 @@ async function handleBatchImport(input) {
     <div class="modal-body">
       <div style="margin-bottom:12px;padding:10px 14px;background:rgba(39,174,96,0.08);border-radius:8px;font-size:13px;">
         ✅ Processed <b>${results.length}</b> file(s) — <b>${totalAdded}</b> tasks added, <b>${totalUpdated}</b> updated
+        ${notLogSheet.length ? `<div style="margin-top:6px;color:var(--text3);font-size:11px;">${notLogSheet.length} Excel file(s) skipped — no day sheets (1–31): ${notLogSheet.slice(0,4).map(escHtml).join(', ')}${notLogSheet.length>4?' …':''}</div>` : ''}
+        ${ignored ? `<div style="margin-top:4px;color:var(--text3);font-size:11px;">${ignored} non-Excel file(s) ignored.</div>` : ''}
         ${unmatched.length > 0 ? `<span style="color:var(--red);margin-left:12px;">⚠ ${unmatched.length} file(s) could not be matched</span>` : ''}
       </div>
       <div style="overflow-x:auto;max-height:340px;overflow-y:auto;">
@@ -3488,10 +3831,29 @@ function pushToFirebase(key, data) {
   } catch(e) { _isSyncing = false; }
 }
 
+// During a bulk import we write to localStorage on every file but push to
+// Firebase only once at the end. Pushing the whole database per file is slow
+// and lets concurrent set() calls race each other.
+let _deferSync = null;
+function beginDeferredSync() { _deferSync = new Set(); }
+function endDeferredSync() {
+  const keys = _deferSync;
+  _deferSync = null;
+  if (!keys) return;
+  keys.forEach(k => {
+    const raw = localStorage.getItem(k);
+    if (!raw) return;
+    try { pushToFirebase(k, JSON.parse(raw)); } catch(e){}
+  });
+}
+
 function save(key, data) {
   try {
     localStorage.setItem(key, JSON.stringify(data));
-    if (SYNC_KEYS.includes(key)) pushToFirebase(key, data);
+    if (SYNC_KEYS.includes(key)) {
+      if (_deferSync) _deferSync.add(key);
+      else pushToFirebase(key, data);
+    }
   } catch(e){}
 }
 function load(key, def) {
@@ -8355,29 +8717,42 @@ function saveDailyLog(uid, date) {
       changeLog.push(`status → ${newStatus}`);
     }
     // Time log
-    const existIdx = (tasks[idx].timeLogs||[]).findIndex(l => l.userId === uid && l.date === date);
+    // One entry per user+date. Any legacy duplicates for this day are collapsed
+    // into it. Indexes are always recomputed after a removal — never reused.
+    const sameDay = () => (tasks[idx].timeLogs || [])
+      .reduce((a, l, i) => (l.userId === uid && l.date === date ? a.concat(i) : a), []);
+    const dropDay = () => {
+      const n = (tasks[idx].timeLogs || []).length;
+      tasks[idx].timeLogs = (tasks[idx].timeLogs || [])
+        .filter(l => !(l.userId === uid && l.date === date));
+      return n - tasks[idx].timeLogs.length;
+    };
+
     if (hours > 0) {
-      // Collapse any legacy duplicate rows for this user+date down to one entry
-      const dupes = (tasks[idx].timeLogs||[]).filter(l => l.userId === uid && l.date === date);
-      if (dupes.length > 1) {
-        tasks[idx].timeLogs = tasks[idx].timeLogs.filter(l => !(l.userId === uid && l.date === date));
-        changed = true; changeLog.push('merged ' + dupes.length + ' duplicate entries');
-      }
       const entry = { userId: uid, date, hours, note,
                       desc: (desc !== null ? desc : ''), due: (dueDate !== null ? dueDate : '') };
-      if (existIdx >= 0) {
-        if (tasks[idx].timeLogs[existIdx].hours !== hours || tasks[idx].timeLogs[existIdx].note !== note) {
-          tasks[idx].timeLogs[existIdx] = entry; changed = true;
-          changeLog.push(`${hours}h logged`);
+      const hits = sameDay();
+      if (hits.length > 1) {
+        const n = dropDay();
+        tasks[idx].timeLogs.push(entry);
+        changed = true;
+        changeLog.push('merged ' + n + ' duplicate entries · ' + hours + 'h logged');
+      } else if (hits.length === 1) {
+        const prev = tasks[idx].timeLogs[hits[0]];
+        if (prev.hours !== hours || (prev.note || '') !== note ||
+            (prev.desc || '') !== entry.desc || (prev.due || '') !== entry.due) {
+          tasks[idx].timeLogs[hits[0]] = entry;
+          changed = true;
+          changeLog.push(hours + 'h logged');
         }
       } else {
-        tasks[idx].timeLogs = [...(tasks[idx].timeLogs||[]), entry];
+        tasks[idx].timeLogs = [...(tasks[idx].timeLogs || []), entry];
         changed = true;
-        changeLog.push(`${hours}h logged`);
+        changeLog.push(hours + 'h logged');
       }
-    } else if (hours === 0 && existIdx >= 0) {
-      tasks[idx].timeLogs.splice(existIdx, 1); changed = true;
-      changeLog.push('time entry removed');
+    } else {
+      const n = dropDay();
+      if (n > 0) { changed = true; changeLog.push('time entry removed'); }
     }
 
     if (changed) {
